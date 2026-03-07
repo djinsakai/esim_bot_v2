@@ -23,6 +23,7 @@ class Esim(Base):
     provider: str                       # Operator name: МТС, Билайн, Мегафон, Tele2, etc.
     image_file_id: str                  # Telegram file_id for the QR image
     status: str                         # 'available' or 'issued'
+    is_test: bool                       # False = production, True = test eSIM
     issued_to_user_id: int | None       # Telegram user ID who received the eSIM
     created_at: datetime                # When added to database
     updated_at: datetime                # Auto-updated on status changes
@@ -131,6 +132,31 @@ Accessible only to superadmins (ALLOWED_USERS). Three functions:
 2. **Add User** - FSM state `AdminState.waiting_for_add_user_id`, validates numeric ID, checks for duplicates
 3. **Remove User** - FSM state `AdminState.waiting_for_remove_user_id`, deletes from database
 
+### Test eSIM System
+The bot supports separate test eSIMs that are segregated from production stock but counted together in statistics.
+
+**Upload Flow:**
+- Main menu has "🧪 Загрузить тестовую" button
+- When clicked, FSM state data is set with `is_test=True`
+- Same auto-detection and QR parsing logic applies
+- After successful save, broadcasts notification to all authorized users:
+  ```
+  ⚠️ <b>Внимание!</b> Загружена новая тестовая eSIM (Оператор: {provider}). Пожалуйста, проверьте её в меню получения.
+  ```
+- FSM loop continues with `is_test` flag preserved
+
+**Issue Flow:**
+- "📤 Получить eSIM" shows normal stock by provider
+- If test eSIMs exist, shows additional button "🧪 Тестовые eSIM (N шт.)"
+- Clicking test button shows provider selection for test eSIMs only
+- Test eSIM issuance includes "(ТЕСТОВАЯ)" in the message caption
+- Uses same `SELECT ... FOR UPDATE` lock mechanism
+
+**Statistics:**
+- Counts BOTH normal and test eSIMs together (no filtering by `is_test`)
+- Total Available = normal + test
+- Today's Activity = normal + test
+
 ## 3. Recent Changes & Implementations
 
 - **ReplyKeyboardMarkup for Main Menu:** Changed from InlineKeyboardMarkup to ReplyKeyboardMarkup with `resize_keyboard=True`. Handlers now listen for `F.text == "📥 Загрузить eSIM"` instead of callback queries.
@@ -142,6 +168,22 @@ Accessible only to superadmins (ALLOWED_USERS). Three functions:
 - **Document Upload Support:** Extended handler to accept both `F.photo` and `F.document` with image mime_type check.
 - **Photo File ID Fallback:** Added try/except around `answer_photo` to catch `TelegramBadRequest` and fall back to text-only message with warning about unavailable photo.
 - **Dynamic User Management:** Added `users` table, Admin Panel with user add/remove/list functionality. Authorization now checks both `ALLOWED_USERS` (superadmins) and `users` table (regular users).
+- **Test eSIM System:** Added ability to upload and issue separate "test" eSIMs.
+  - New `is_test` boolean column in `esims` table (default False)
+  - Main menu updated: "📥 Загрузить eSIM" | "🧪 Загрузить тестовую"
+  - Upload flow uses FSM state data to track `is_test` flag
+  - Broadcast notification sent to all users when test eSIM is uploaded
+  - Issue menu separates normal and test stock with "🧪 Тестовые eSIM" button
+  - Test eSIMs display "(ТЕСТОВАЯ)" in caption
+  - Statistics counts both normal and test eSIMs together
+- **Statistics Date Formatting:** Changed "СЕГОДНЯ" to actual date in DD.MM.YY format (e.g., "07.03.26").
+- **Statistics UI Redesign:** Redesigned statistics output to terminal-style with pseudo-graphics:
+  - Header: `<b>📊 Сводка eSIM</b>`
+  - Separator: `━━━━━━━━━━━━━━━━━━`
+  - Available section with tree branches (├ for non-last, └ for last)
+  - Issued section with date in format `📈 Выдано (DD.MM.YY): <b>{count}</b>`
+  - Uses `ParseMode.HTML` for bold text
+- **FSM is_test Flag Bug Fix:** Explicitly set `is_test=False` in normal "📥 Загрузить eSIM" handler to prevent flag leakage from previous FSM sessions.
 
 ## 4. Pending / Future Features (v2)
 

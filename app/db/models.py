@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Integer, String, DateTime, BigInteger, Enum
+from sqlalchemy import Integer, String, DateTime, BigInteger, Enum, Boolean
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 import enum
 
@@ -22,6 +22,7 @@ class Esim(Base):
     provider: Mapped[str] = mapped_column(String(100))
     image_file_id: Mapped[str] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(20), default=EsimStatus.AVAILABLE.value)
+    is_test: Mapped[bool] = mapped_column(Boolean, default=False)
     issued_to_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

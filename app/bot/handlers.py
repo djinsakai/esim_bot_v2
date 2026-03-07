@@ -61,11 +61,27 @@ def get_provider_from_domain(lpa_string: str) -> str | None:
     return None
 
 
+async def broadcast_test_esim(provider: str, bot: Bot):
+    user_ids = set(config.allowed_users)
+    
+    async with async_session_maker() as session:
+        result = await session.execute(select(User.telegram_id))
+        db_user_ids = result.scalars().all()
+        user_ids.update(db_user_ids)
+    
+    message_text = f"⚠️ <b>Внимание!</b> Загружена новая тестовая eSIM (Оператор: {provider}). Пожалуйста, проверьте её в меню получения."
+    
+    for user_id in user_ids:
+        try:
+            await bot.send_message(chat_id=user_id, text=message_text, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+
+
 def get_main_menu(is_admin: bool = False):
     keyboard = [
-        [KeyboardButton(text="📥 Загрузить eSIM")],
-        [KeyboardButton(text="📤 Получить eSIM")],
-        [KeyboardButton(text="📊 Статистика")],
+        [KeyboardButton(text="📥 Загрузить eSIM"), KeyboardButton(text="🧪 Загрузить тестовую")],
+        [KeyboardButton(text="📤 Получить eSIM"), KeyboardButton(text="📊 Статистика")],
     ]
     if is_admin:
         keyboard.append([KeyboardButton(text="⚙️ Админ-панель")])
@@ -118,16 +134,46 @@ async def cmd_start(message: Message):
 @router.message(F.text == "📥 Загрузить eSIM", AllowedUserFilter())
 async def upload_esim_start(message: Message, state: FSMContext):
     await message.answer("Пожалуйста, отправьте фото QR-кода eSIM.")
+    await state.update_data(is_test=False)
+    await state.set_state(UploadState.waiting_for_photo)
+
+
+@router.message(F.text == "🧪 Загрузить тестовую", AllowedUserFilter())
+async def upload_test_esim_start(message: Message, state: FSMContext):
+    await message.answer("Пожалуйста, отправьте фото QR-кода тестовой eSIM.")
+    await state.update_data(is_test=True)
     await state.set_state(UploadState.waiting_for_photo)
 
 
 @router.message(F.text == "📤 Получить eSIM", AllowedUserFilter())
 async def get_esim_start(message: Message):
-    stock = await get_stock_by_provider()
-    if not stock:
+    stock = await get_stock_by_provider(is_test=False)
+    test_stock = await get_stock_by_provider(is_test=True)
+    test_total = sum(test_stock.values())
+    
+    buttons = []
+    for provider, count in stock.items():
+        if count > 0:
+            buttons.append([InlineKeyboardButton(text=f"{provider} ({count} шт.)", callback_data=f"get_provider:{provider}")])
+    
+    if test_total > 0:
+        buttons.append([InlineKeyboardButton(text=f"🧪 Тестовые eSIM ({test_total} шт.)", callback_data="get_test_providers")])
+    
+    if not buttons:
         await message.answer("Нет доступных eSIM в базе.")
     else:
-        await message.answer("Выберите оператора:", reply_markup=get_provider_stock_buttons(stock))
+        await message.answer("Выберите оператора:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+def format_provider_list(provider_counts: dict) -> str:
+    if not provider_counts:
+        return ""
+    providers = list(provider_counts.items())
+    lines = []
+    for i, (provider, count) in enumerate(providers):
+        prefix = " ├ " if i < len(providers) - 1 else " └ "
+        lines.append(f"{prefix}{provider}: {count}")
+    return "\n".join(lines)
 
 
 @router.message(F.text == "📊 Статистика", AllowedUserFilter())
@@ -166,21 +212,24 @@ async def show_stats(message: Message):
         )
         issued_provider_counts = {row[0]: row[1] for row in issued_by_provider_result.all()}
     
-    text = "📊 Наличие в базе:\n"
-    text += f"🟢 Всего доступно: {total_available} шт.\n"
-    for provider, count in provider_counts.items():
-        text += f"- {provider}: {count}\n"
+    formatted_date = today.strftime("%d.%m.%y")
     
-    text += f"\n📈 Активность за СЕГОДНЯ:\n"
-    text += f"✅ Всего использовано: {total_issued_today} шт.\n"
-    for provider, count in issued_provider_counts.items():
-        text += f"- {provider}: {count}\n"
+    text = "<b>📊 Сводка eSIM</b>\n"
+    text += "━━━━━━━━━━━━━━━━━━\n"
+    text += f"🟢 В наличии: <b>{total_available}</b> шт.\n"
+    text += format_provider_list(provider_counts)
+    text += f"\n\n📈 Выдано ({formatted_date}): <b>{total_issued_today}</b> шт.\n"
+    text += format_provider_list(issued_provider_counts)
+    text += "\n━━━━━━━━━━━━━━━━━━"
     
-    await message.answer(text, reply_markup=get_stats_keyboard())
+    await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_stats_keyboard())
 
 
 @router.message(UploadState.waiting_for_photo, F.photo | F.document, AllowedUserFilter())
 async def process_photo(message: Message, state: FSMContext, bot: Bot):
+    state_data = await state.get_data()
+    is_test = state_data.get("is_test", False)
+    
     if message.photo:
         file_id = message.photo[-1].file_id
     elif message.document and message.document.mime_type.startswith("image/"):
@@ -202,7 +251,7 @@ async def process_photo(message: Message, state: FSMContext, bot: Bot):
             select(Esim).where(Esim.lpa_string == lpa_string)
         )
         if existing.scalar_one_or_none():
-            await message.answer("❌ Эта eSIM уже есть в базе! Отправьте следующее фото QR-кода или нажмите 'Отмена' для выхода.")
+            await message.answer("❌ Эта eSIM уже есть в базе! Отправьте следующее фото QR-кода.")
             return
     
     detected_provider = get_provider_from_domain(lpa_string)
@@ -214,13 +263,17 @@ async def process_photo(message: Message, state: FSMContext, bot: Bot):
                     lpa_string=lpa_string,
                     provider=detected_provider,
                     image_file_id=file_id,
-                    status=EsimStatus.AVAILABLE.value
+                    status=EsimStatus.AVAILABLE.value,
+                    is_test=is_test
                 )
                 session.add(esim)
                 await session.commit()
             except Exception:
                 await message.answer("❌ Эта eSIM уже есть в базе! Отправьте следующее фото QR-кода или нажмите 'Отмена' для выхода.")
                 return
+        
+        if is_test:
+            await broadcast_test_esim(detected_provider, bot)
         
         await message.answer(f"✅ eSIM ({detected_provider}) успешно добавлена! Отправьте следующее фото QR-кода или нажмите 'Отмена' для выхода.")
     else:
@@ -230,27 +283,45 @@ async def process_photo(message: Message, state: FSMContext, bot: Bot):
 
 
 @router.callback_query(UploadState.waiting_for_provider, AllowedUserFilter())
-async def process_provider(callback: CallbackQuery, state: FSMContext):
+async def process_provider(callback: CallbackQuery, state: FSMContext, bot: Bot):
     provider = callback.data.replace("provider:", "")
     data = await state.get_data()
+    is_test = data.get("is_test", False)
     
     async with async_session_maker() as session:
+        existing = await session.execute(
+            select(Esim).where(Esim.lpa_string == data["lpa_string"])
+        )
+        if existing.scalar_one_or_none():
+            try:
+                await callback.message.answer("❌ Эта eSIM уже есть в базе!")
+                await callback.answer()
+            except Exception:
+                pass
+            await state.set_state(UploadState.waiting_for_photo)
+            return
+        
         try:
             esim = Esim(
                 lpa_string=data["lpa_string"],
                 provider=provider,
                 image_file_id=data["file_id"],
-                status=EsimStatus.AVAILABLE.value
+                status=EsimStatus.AVAILABLE.value,
+                is_test=is_test
             )
             session.add(esim)
             await session.commit()
         except Exception:
             try:
+                await callback.message.answer("❌ Эта eSIM уже есть в базе!")
                 await callback.answer()
             except Exception:
                 pass
-            await state.clear()
+            await state.set_state(UploadState.waiting_for_photo)
             return
+    
+    if is_test:
+        await broadcast_test_esim(provider, bot)
     
     try:
         await callback.message.answer(f"✅ eSIM ({provider}) успешно добавлена! Отправьте следующее фото QR-кода или нажмите 'Отмена' для выхода.")
@@ -272,11 +343,14 @@ async def cancel_upload(message: Message, state: FSMContext):
     await message.answer("Загрузка отменена.", reply_markup=get_main_menu(is_admin))
 
 
-async def get_stock_by_provider() -> dict:
+async def get_stock_by_provider(is_test: bool = False) -> dict:
     async with async_session_maker() as session:
         result = await session.execute(
             select(Esim.provider, func.count(Esim.id))
-            .where(Esim.status == EsimStatus.AVAILABLE.value)
+            .where(
+                Esim.status == EsimStatus.AVAILABLE.value,
+                Esim.is_test == is_test
+            )
             .group_by(Esim.provider)
         )
         return {row[0]: row[1] for row in result.all()}
@@ -292,7 +366,8 @@ async def process_get_esim(callback: CallbackQuery):
             select(Esim)
             .where(
                 Esim.provider == provider,
-                Esim.status == EsimStatus.AVAILABLE.value
+                Esim.status == EsimStatus.AVAILABLE.value,
+                Esim.is_test == False
             )
             .order_by(Esim.created_at)
             .limit(1)
@@ -323,6 +398,86 @@ async def process_get_esim(callback: CallbackQuery):
         except TelegramBadRequest:
             await callback.message.answer(
                 f"Оператор: <b>{esim.provider}</b>\nQR строка:\n<code>{esim.lpa_string}</code>\n\n<i>(⚠️ Фото QR-кода недоступно, скопируйте текстовый адрес выше)</i>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_issued_esim_keyboard(esim.id)
+            )
+    
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "get_test_providers", AllowedUserFilter())
+async def get_test_providers(callback: CallbackQuery):
+    test_stock = await get_stock_by_provider(is_test=True)
+    
+    buttons = []
+    for provider, count in test_stock.items():
+        if count > 0:
+            buttons.append([InlineKeyboardButton(text=f"{provider} ({count} шт.)", callback_data=f"get_test_provider:{provider}")])
+    
+    if not buttons:
+        await callback.message.answer("Нет доступных тестовых eSIM.")
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+        return
+    
+    try:
+        await callback.message.edit_text("Выберите оператора (тестовые):", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except Exception:
+        await callback.message.answer("Выберите оператора (тестовые):", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("get_test_provider:"), AllowedUserFilter())
+async def process_get_test_esim(callback: CallbackQuery):
+    provider = callback.data.replace("get_test_provider:", "")
+    user_id = callback.from_user.id
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Esim)
+            .where(
+                Esim.provider == provider,
+                Esim.status == EsimStatus.AVAILABLE.value,
+                Esim.is_test == True
+            )
+            .order_by(Esim.created_at)
+            .limit(1)
+            .with_for_update()
+        )
+        esim = result.scalar_one_or_none()
+        
+        if not esim:
+            await callback.message.answer("Нет доступных тестовых eSIM этого оператора.")
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+            return
+        
+        esim.status = EsimStatus.ISSUED.value
+        esim.issued_to_user_id = user_id
+        esim.updated_at = datetime.utcnow()
+        await session.commit()
+        
+        try:
+            await callback.message.answer_photo(
+                photo=esim.image_file_id,
+                caption=f"Оператор: <b>{esim.provider}</b> (ТЕСТОВАЯ)\nQR строка:\n<code>{esim.lpa_string}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_issued_esim_keyboard(esim.id)
+            )
+        except TelegramBadRequest:
+            await callback.message.answer(
+                f"Оператор: <b>{esim.provider}</b> (ТЕСТОВАЯ)\nQR строка:\n<code>{esim.lpa_string}</code>\n\n<i>(⚠️ Фото QR-кода недоступно, скопируйте текстовый адрес выше)</i>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_issued_esim_keyboard(esim.id)
             )
@@ -606,18 +761,18 @@ async def confirm_reset_stats(callback: CallbackQuery):
         )
         issued_provider_counts = {row[0]: row[1] for row in issued_by_provider_result.all()}
     
-    text = "📊 Наличие в базе:\n"
-    text += f"🟢 Всего доступно: {total_available} шт.\n"
-    for provider, count in provider_counts.items():
-        text += f"- {provider}: {count}\n"
+    formatted_date = today.strftime("%d.%m.%y")
     
-    text += f"\n📈 Активность за СЕГОДНЯ:\n"
-    text += f"✅ Всего использовано: {total_issued_today} шт.\n"
-    for provider, count in issued_provider_counts.items():
-        text += f"- {provider}: {count}\n"
+    text = "<b>📊 Сводка eSIM</b>\n"
+    text += "━━━━━━━━━━━━━━━━━━\n"
+    text += f"🟢 В наличии: <b>{total_available}</b> шт.\n"
+    text += format_provider_list(provider_counts)
+    text += f"\n\n📈 Выдано ({formatted_date}): <b>{total_issued_today}</b> шт.\n"
+    text += format_provider_list(issued_provider_counts)
+    text += "\n━━━━━━━━━━━━━━━━━━"
     
     try:
-        await callback.message.edit_text(text, reply_markup=get_stats_keyboard())
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_stats_keyboard())
     except Exception:
         pass
 
@@ -658,18 +813,18 @@ async def cancel_reset_stats(callback: CallbackQuery):
         )
         issued_provider_counts = {row[0]: row[1] for row in issued_by_provider_result.all()}
     
-    text = "📊 Наличие в базе:\n"
-    text += f"🟢 Всего доступно: {total_available} шт.\n"
-    for provider, count in provider_counts.items():
-        text += f"- {provider}: {count}\n"
+    formatted_date = today.strftime("%d.%m.%y")
     
-    text += f"\n📈 Активность за СЕГОДНЯ:\n"
-    text += f"✅ Всего использовано: {total_issued_today} шт.\n"
-    for provider, count in issued_provider_counts.items():
-        text += f"- {provider}: {count}\n"
+    text = "<b>📊 Сводка eSIM</b>\n"
+    text += "━━━━━━━━━━━━━━━━━━\n"
+    text += f"🟢 В наличии: <b>{total_available}</b> шт.\n"
+    text += format_provider_list(provider_counts)
+    text += f"\n\n📈 Выдано ({formatted_date}): <b>{total_issued_today}</b> шт.\n"
+    text += format_provider_list(issued_provider_counts)
+    text += "\n━━━━━━━━━━━━━━━━━━"
     
     try:
-        await callback.message.edit_text(text, reply_markup=get_stats_keyboard())
+        await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_stats_keyboard())
     except Exception:
         pass
     

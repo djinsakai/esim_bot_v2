@@ -59,7 +59,6 @@ def _append_new_esim_sync(esim_id: int, provider: str, lpa_string: str):
         formatted_date,
         provider,
         lpa_string,
-        "",
         "🟢 Доступна",
         "",
         ""
@@ -106,6 +105,6 @@ def _update_esim_status_sync(
         logger.warning(f"eSIM {esim_id} not found in Google Sheet")
         return
     
-    worksheet.update_cell(row_index, 6, status)
-    worksheet.update_cell(row_index, 7, user_identifier)
-    worksheet.update_cell(row_index, 8, issued_at)
+    worksheet.update_cell(row_index, 5, status)
+    worksheet.update_cell(row_index, 6, user_identifier)
+    worksheet.update_cell(row_index, 7, issued_at)

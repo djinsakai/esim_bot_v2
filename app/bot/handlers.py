@@ -10,12 +10,14 @@ from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+import asyncio
 
 from app.db.models import Esim, EsimStatus, User
 from app.db.database import async_session_maker
 from app.utils.qr_reader import read_qr_code
 from app.utils.config import config
 from app.bot.filters import AllowedUserFilter
+from app.services import google_sheets
 
 router = Router()
 storage = MemoryStorage()
@@ -268,9 +270,14 @@ async def process_photo(message: Message, state: FSMContext, bot: Bot):
                 )
                 session.add(esim)
                 await session.commit()
+                await session.refresh(esim)
+                esim_id = esim.id
             except Exception:
                 await message.answer("❌ Эта eSIM уже есть в базе! Отправьте следующее фото QR-кода или нажмите 'Отмена' для выхода.")
                 return
+        
+        if config.google_sheet_id:
+            asyncio.create_task(google_sheets.append_new_esim(esim_id, detected_provider, lpa_string))
         
         if is_test:
             await broadcast_test_esim(detected_provider, bot)
@@ -311,6 +318,8 @@ async def process_provider(callback: CallbackQuery, state: FSMContext, bot: Bot)
             )
             session.add(esim)
             await session.commit()
+            await session.refresh(esim)
+            esim_id = esim.id
         except Exception:
             try:
                 await callback.message.answer("❌ Эта eSIM уже есть в базе!")
@@ -319,6 +328,9 @@ async def process_provider(callback: CallbackQuery, state: FSMContext, bot: Bot)
                 pass
             await state.set_state(UploadState.waiting_for_photo)
             return
+    
+    if config.google_sheet_id:
+        asyncio.create_task(google_sheets.append_new_esim(esim_id, provider, data["lpa_string"]))
     
     if is_test:
         await broadcast_test_esim(provider, bot)
@@ -360,6 +372,7 @@ async def get_stock_by_provider(is_test: bool = False) -> dict:
 async def process_get_esim(callback: CallbackQuery):
     provider = callback.data.replace("get_provider:", "")
     user_id = callback.from_user.id
+    username = callback.from_user.username
     
     async with async_session_maker() as session:
         result = await session.execute(
@@ -383,10 +396,18 @@ async def process_get_esim(callback: CallbackQuery):
                 pass
             return
         
+        esim_id = esim.id
         esim.status = EsimStatus.ISSUED.value
         esim.issued_to_user_id = user_id
         esim.updated_at = datetime.utcnow()
         await session.commit()
+        
+        if config.google_sheet_id:
+            user_identifier = f"@{username} ({user_id})" if username else str(user_id)
+            formatted_date = datetime.now().strftime("%d.%m.%Y %H:%M")
+            asyncio.create_task(google_sheets.update_esim_status(
+                esim_id, "🔴 Выдана", user_identifier, formatted_date
+            ))
         
         try:
             await callback.message.answer_photo(
@@ -440,6 +461,7 @@ async def get_test_providers(callback: CallbackQuery):
 async def process_get_test_esim(callback: CallbackQuery):
     provider = callback.data.replace("get_test_provider:", "")
     user_id = callback.from_user.id
+    username = callback.from_user.username
     
     async with async_session_maker() as session:
         result = await session.execute(
@@ -463,10 +485,18 @@ async def process_get_test_esim(callback: CallbackQuery):
                 pass
             return
         
+        esim_id = esim.id
         esim.status = EsimStatus.ISSUED.value
         esim.issued_to_user_id = user_id
         esim.updated_at = datetime.utcnow()
         await session.commit()
+        
+        if config.google_sheet_id:
+            user_identifier = f"@{username} ({user_id})" if username else str(user_id)
+            formatted_date = datetime.now().strftime("%d.%m.%Y %H:%M")
+            asyncio.create_task(google_sheets.update_esim_status(
+                esim_id, "🔴 Выдана", user_identifier, formatted_date
+            ))
         
         try:
             await callback.message.answer_photo(
@@ -518,6 +548,11 @@ async def return_esim(callback: CallbackQuery):
         esim.updated_at = datetime.utcnow()
         await session.commit()
         
+        if config.google_sheet_id:
+            asyncio.create_task(google_sheets.update_esim_status(
+                esim_id, "🟢 Доступна", "", ""
+            ))
+        
         await callback.message.answer("✅ eSIM возвращена в базу.")
         await callback.message.delete()
     
@@ -546,7 +581,7 @@ async def admin_panel(message: Message):
 
 
 @router.callback_query(F.data == "admin_list_users", AllowedUserFilter())
-async def admin_list_users(callback: CallbackQuery):
+async def admin_list_users(callback: CallbackQuery, bot: Bot):
     is_admin = callback.from_user.id in config.allowed_users
     if not is_admin:
         try:
@@ -557,7 +592,7 @@ async def admin_list_users(callback: CallbackQuery):
     
     async with async_session_maker() as session:
         result = await session.execute(
-            select(User).order_by(User.added_at.desc())
+            select(User).order_by(User.added_at.desc()).limit(20)
         )
         users = result.scalars().all()
     
@@ -566,8 +601,12 @@ async def admin_list_users(callback: CallbackQuery):
     else:
         text = "👥 Список пользователей с доступом:\n"
         for i, user in enumerate(users, 1):
-            username_str = f" (@{user.username})" if user.username else ""
-            text += f"{i}. ID: {user.telegram_id}{username_str}\n"
+            try:
+                chat = await bot.get_chat(user.telegram_id)
+                username = f"@{chat.username}" if chat.username else "без username"
+            except Exception:
+                username = "user not found"
+            text += f"{i}. ID: {user.telegram_id} ({username})\n"
     
     try:
         await callback.message.edit_text(text, reply_markup=get_admin_panel_keyboard())

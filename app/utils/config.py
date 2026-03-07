@@ -13,6 +13,8 @@ class Config:
     db_user: str
     db_password: str
     database_url: str
+    google_sheet_id: str
+    google_credentials_path: str
     
     @property
     def async_database_url(self) -> str:
@@ -42,6 +44,8 @@ def load_config() -> Config:
         db_user=os.getenv("DB_USER", "postgres"),
         db_password=os.getenv("DB_PASSWORD", ""),
         database_url=os.getenv("DATABASE_URL", ""),
+        google_sheet_id=os.getenv("GOOGLE_SHEET_ID", ""),
+        google_credentials_path=os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json"),
     )
 
 

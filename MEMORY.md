@@ -184,11 +184,20 @@ The bot supports separate test eSIMs that are segregated from production stock b
   - Issued section with date in format `📈 Выдано (DD.MM.YY): <b>{count}</b>`
   - Uses `ParseMode.HTML` for bold text
 - **FSM is_test Flag Bug Fix:** Explicitly set `is_test=False` in normal "📥 Загрузить eSIM" handler to prevent flag leakage from previous FSM sessions.
+- **Duplicate Check Fix:** Added duplicate check to `process_provider` handler (manual provider selection). Both auto-detect and manual paths now check for duplicates before insert.
+- **Google Sheets CRM Sync:** Implemented real-time synchronization with Google Sheets as live CRM dashboard.
+  - Sheet columns: ID | Дата загрузки | Оператор | LPA строка | Ссылка на QR-код | Статус | Кому выдана | Дата выдачи
+  - `append_new_esim()` called on upload (async via `asyncio.create_task`)
+  - `update_esim_status()` called on issue/return (async via `asyncio.create_task`)
+  - Issue updates: Status → "🔴 Выдана", User → "@username (id)", Date → "DD.MM.YYYY HH:MM"
+  - Return updates: Status → "🟢 Доступна", User → "", Date → ""
+  - All Google API calls are fire-and-forget; failures are logged but don't interrupt Telegram flow
+  - Config: `GOOGLE_SHEET_ID` and `GOOGLE_CREDENTIALS_PATH` in .env
+- **User List Real Usernames:** Admin panel "Список пользователей" now fetches real usernames via `bot.get_chat(telegram_id)`, limited to last 20 users to avoid rate limits.
 
 ## 4. Pending / Future Features (v2)
 
 - **Persistent Image Storage:** Transition from Telegram `file_id` to Google Drive API or local filesystem storage. Current `file_id` approach can fail if Telegram purges old files.
-- **Google Sheets Sync:** Sync database records with Google Sheets for external tracking/reporting.
 - **Analytics Dashboard:** More detailed statistics, charts, historical data.
 - **Notification System:** Alert admins when stock is low.
 - **User Roles:** Add roles like "editor", "viewer" with different permissions.

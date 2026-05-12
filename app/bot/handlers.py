@@ -3,6 +3,7 @@ from aiogram import Router, F, Bot
 from aiogram.types import Message, PhotoSize, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
+from aiogram.filters.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -20,12 +21,29 @@ from app.bot.filters import AllowedUserFilter
 from app.services import google_sheets
 
 router = Router()
+
+# Temporarily disabled chat type filter for debugging
+# router.message.filter(F.chat.type == "private")
+# router.callback_query.filter(F.chat.type == "private")
+
+# DEBUG: Capture group chat IDs
+@router.message(F.chat.type.in_({"group", "supergroup"}))
+async def debug_group_message(message: Message):
+    print(f"DEBUG GROUP: chat_id={message.chat.id}, title={message.chat.title}")
+    await message.answer(f"Group chat ID: {message.chat.id}\nAdd this to .env")
+
 storage = MemoryStorage()
 
 
 class UploadState(StatesGroup):
     waiting_for_photo = State()
     waiting_for_provider = State()
+    selecting_supplier = State()
+    waiting_for_supplier_name = State()
+
+
+class TestSlotState(StatesGroup):
+    waiting_for_test_result = State()
 
 
 class GetEsimState(StatesGroup):
@@ -108,6 +126,7 @@ def get_provider_stock_buttons(stock_dict: dict):
 def get_issued_esim_keyboard(esim_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Вернуть в базу", callback_data=f"return:{esim_id}")],
+        [InlineKeyboardButton(text="🚫 Не ворк", callback_data=f"dead_esim:{esim_id}")],
     ])
 
 
@@ -124,8 +143,22 @@ def get_reset_confirmation_keyboard():
     ])
 
 
+def get_test_result_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚫 Не ворк", callback_data="test_esim_dead")],
+    ])
+
+
+def get_supplier_selection_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Загрузить eSIM (наш)", callback_data="supplier_ours")],
+        [InlineKeyboardButton(text="🛒 Загрузить eSIM (поставщик)", callback_data="supplier_other")],
+    ])
+
+
 @router.message(Command("start"), AllowedUserFilter())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     is_admin = message.from_user.id in config.allowed_users
     await message.answer(
         "Добро пожаловать в меню eSIM менеджера!",
@@ -135,16 +168,110 @@ async def cmd_start(message: Message):
 
 @router.message(F.text == "📥 Загрузить eSIM", AllowedUserFilter())
 async def upload_esim_start(message: Message, state: FSMContext):
-    await message.answer("Пожалуйста, отправьте фото QR-кода eSIM.")
-    await state.update_data(is_test=False)
-    await state.set_state(UploadState.waiting_for_photo)
+    try:
+        print(f"Upload eSIM handler triggered for user {message.from_user.id}")
+        await state.clear()
+        await state.update_data(is_test=False)
+        await message.answer(
+            "Выберите тип загрузки:",
+            reply_markup=get_supplier_selection_keyboard()
+        )
+        await state.set_state(UploadState.selecting_supplier)
+    except Exception as e:
+        print(f"ERROR in upload_esim_start: {e}")
+        await message.answer(f"Ошибка: {e}")
 
 
 @router.message(F.text == "🧪 Загрузить тестовую", AllowedUserFilter())
 async def upload_test_esim_start(message: Message, state: FSMContext):
-    await message.answer("Пожалуйста, отправьте фото QR-кода тестовой eSIM.")
-    await state.update_data(is_test=True)
+    try:
+        print(f"Upload test eSIM handler triggered for user {message.from_user.id}")
+        await state.clear()
+        await state.update_data(is_test=True)
+        await message.answer(
+            "Выберите тип загрузки:",
+            reply_markup=get_supplier_selection_keyboard()
+        )
+        await state.set_state(UploadState.selecting_supplier)
+    except Exception as e:
+        print(f"ERROR in upload_test_esim_start: {e}")
+        await message.answer(f"Ошибка: {e}")
+
+
+@router.callback_query(F.data == "supplier_ours", AllowedUserFilter())
+async def process_supplier_ours(callback: CallbackQuery, state: FSMContext):
+    print(f"!!! HANDLER process_supplier_ours called for user {callback.from_user.id}")
+    # Preserve is_test flag before clearing state
+    state_data = await state.get_data()
+    is_test = state_data.get("is_test", False)
+    await state.clear()
+    await state.update_data(supplier=config.our_supplier_name, is_test=is_test)
+    try:
+        await callback.message.edit_text(
+            f"✅ Выбран поставщик: {config.our_supplier_name}\n\n"
+            "Теперь отправьте QR-коды eSIM (фото или документ).",
+            reply_markup=None
+        )
+    except Exception as e:
+        print(f"edit_text failed: {e}, using answer instead")
+        await callback.message.answer(
+            f"✅ Выбран поставщик: {config.our_supplier_name}\n\n"
+            "Теперь отправьте QR-коды eSIM (фото или документ)."
+        )
     await state.set_state(UploadState.waiting_for_photo)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "supplier_other", AllowedUserFilter())
+async def process_supplier_other(callback: CallbackQuery, state: FSMContext):
+    print(f"!!! HANDLER process_supplier_other called for user {callback.from_user.id}")
+    # Preserve is_test flag before clearing state
+    state_data = await state.get_data()
+    is_test = state_data.get("is_test", False)
+    await state.clear()
+    await state.update_data(is_test=is_test)
+    try:
+        try:
+            await callback.message.edit_text(
+                "Введите имя поставщика (например, @supplier_name):",
+                reply_markup=None
+            )
+        except Exception as e:
+            print(f"edit_text failed: {e}, using answer")
+            await callback.message.answer(
+                "Введите имя поставщика (например, @supplier_name):"
+            )
+        await state.set_state(UploadState.waiting_for_supplier_name)
+        await callback.answer()
+    except Exception as e:
+        print(f"Error in process_supplier_other: {e}")
+        try:
+            await callback.message.answer(f"Ошибка: {e}")
+        except Exception:
+            pass
+        await callback.answer()
+
+
+@router.message(UploadState.waiting_for_supplier_name, AllowedUserFilter())
+async def process_supplier_name_input(message: Message, state: FSMContext):
+    try:
+        current_state = await state.get_state()
+        print(f"Current state: {current_state}")
+        
+        supplier_name = message.text.strip()
+        
+        if not supplier_name.startswith('@'):
+            supplier_name = f"@{supplier_name}"
+        
+        await state.update_data(supplier=supplier_name)
+        await message.answer(
+            f"✅ Поставщик: {supplier_name}\n\n"
+            "Теперь отправьте QR-коды eSIM (фото или документ)."
+        )
+        await state.set_state(UploadState.waiting_for_photo)
+    except Exception as e:
+        print(f"Error in process_supplier_name_input: {e}")
+        await message.answer(f"Ошибка: {e}")
 
 
 @router.message(F.text == "📤 Получить eSIM", AllowedUserFilter())
@@ -231,6 +358,7 @@ async def show_stats(message: Message):
 async def process_photo(message: Message, state: FSMContext, bot: Bot):
     state_data = await state.get_data()
     is_test = state_data.get("is_test", False)
+    supplier = state_data.get("supplier", "")
     
     if message.photo:
         file_id = message.photo[-1].file_id
@@ -266,7 +394,8 @@ async def process_photo(message: Message, state: FSMContext, bot: Bot):
                     provider=detected_provider,
                     image_file_id=file_id,
                     status=EsimStatus.AVAILABLE.value,
-                    is_test=is_test
+                    is_test=is_test,
+                    supplier=supplier
                 )
                 session.add(esim)
                 await session.commit()
@@ -277,7 +406,7 @@ async def process_photo(message: Message, state: FSMContext, bot: Bot):
                 return
         
         if config.google_sheet_id:
-            asyncio.create_task(google_sheets.append_new_esim(esim_id, detected_provider, lpa_string))
+            asyncio.create_task(google_sheets.append_new_esim(esim_id, detected_provider, lpa_string, supplier))
         
         if is_test:
             await broadcast_test_esim(detected_provider, bot)
@@ -294,6 +423,7 @@ async def process_provider(callback: CallbackQuery, state: FSMContext, bot: Bot)
     provider = callback.data.replace("provider:", "")
     data = await state.get_data()
     is_test = data.get("is_test", False)
+    supplier = data.get("supplier", "")
     
     async with async_session_maker() as session:
         existing = await session.execute(
@@ -314,7 +444,8 @@ async def process_provider(callback: CallbackQuery, state: FSMContext, bot: Bot)
                 provider=provider,
                 image_file_id=data["file_id"],
                 status=EsimStatus.AVAILABLE.value,
-                is_test=is_test
+                is_test=is_test,
+                supplier=supplier
             )
             session.add(esim)
             await session.commit()
@@ -330,7 +461,7 @@ async def process_provider(callback: CallbackQuery, state: FSMContext, bot: Bot)
             return
     
     if config.google_sheet_id:
-        asyncio.create_task(google_sheets.append_new_esim(esim_id, provider, data["lpa_string"]))
+        asyncio.create_task(google_sheets.append_new_esim(esim_id, provider, data["lpa_string"], supplier))
     
     if is_test:
         await broadcast_test_esim(provider, bot)
@@ -402,6 +533,8 @@ async def process_get_esim(callback: CallbackQuery):
         esim.updated_at = datetime.utcnow()
         await session.commit()
         
+        supplier = esim.supplier if esim.supplier else config.our_supplier_name
+        
         if config.google_sheet_id:
             user_identifier = f"@{username} ({user_id})" if username else str(user_id)
             formatted_date = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -409,16 +542,18 @@ async def process_get_esim(callback: CallbackQuery):
                 esim_id, "🔴 Выдана", user_identifier, formatted_date
             ))
         
+        caption = f"📱 Оператор: <b>{esim.provider}</b>\n🔗 LPA: <code>{esim.lpa_string}</code>\n📦 Поставщик: {supplier}"
+        
         try:
             await callback.message.answer_photo(
                 photo=esim.image_file_id,
-                caption=f"Оператор: <b>{esim.provider}</b>\nQR строка:\n<code>{esim.lpa_string}</code>",
+                caption=caption,
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_issued_esim_keyboard(esim.id)
             )
         except TelegramBadRequest:
             await callback.message.answer(
-                f"Оператор: <b>{esim.provider}</b>\nQR строка:\n<code>{esim.lpa_string}</code>\n\n<i>(⚠️ Фото QR-кода недоступно, скопируйте текстовый адрес выше)</i>",
+                f"{caption}\n\n<i>(⚠️ Фото QR-кода недоступно, скопируйте текстовый адрес выше)</i>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_issued_esim_keyboard(esim.id)
             )
@@ -458,7 +593,7 @@ async def get_test_providers(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("get_test_provider:"), AllowedUserFilter())
-async def process_get_test_esim(callback: CallbackQuery):
+async def process_get_test_esim(callback: CallbackQuery, state: FSMContext, bot: Bot):
     provider = callback.data.replace("get_test_provider:", "")
     user_id = callback.from_user.id
     username = callback.from_user.username
@@ -486,6 +621,10 @@ async def process_get_test_esim(callback: CallbackQuery):
             return
         
         esim_id = esim.id
+        supplier = esim.supplier if esim.supplier else config.our_supplier_name
+        image_file_id = esim.image_file_id
+        lpa_string = esim.lpa_string
+        
         esim.status = EsimStatus.ISSUED.value
         esim.issued_to_user_id = user_id
         esim.updated_at = datetime.utcnow()
@@ -498,24 +637,142 @@ async def process_get_test_esim(callback: CallbackQuery):
                 esim_id, "🔴 Выдана", user_identifier, formatted_date
             ))
         
+        await state.update_data(
+            test_esim_id=esim_id,
+            test_provider=esim.provider,
+            test_lpa_string=lpa_string,
+            test_image_file_id=image_file_id,
+            test_supplier=supplier,
+            test_user_id=user_id,
+            test_username=username
+        )
+        await state.set_state(TestSlotState.waiting_for_test_result)
+        
+        caption = f"📱 Оператор: <b>{provider}</b> (ТЕСТОВАЯ)\n🔗 LPA: <code>{lpa_string}</code>\n📦 Поставщик: {supplier}"
+        
         try:
             await callback.message.answer_photo(
-                photo=esim.image_file_id,
-                caption=f"Оператор: <b>{esim.provider}</b> (ТЕСТОВАЯ)\nQR строка:\n<code>{esim.lpa_string}</code>",
+                photo=image_file_id,
+                caption=caption,
                 parse_mode=ParseMode.HTML,
-                reply_markup=get_issued_esim_keyboard(esim.id)
+                reply_markup=get_issued_esim_keyboard(esim_id)
             )
         except TelegramBadRequest:
             await callback.message.answer(
-                f"Оператор: <b>{esim.provider}</b> (ТЕСТОВАЯ)\nQR строка:\n<code>{esim.lpa_string}</code>\n\n<i>(⚠️ Фото QR-кода недоступно, скопируйте текстовый адрес выше)</i>",
+                f"{caption}\n\n<i>(⚠️ Фото QR-кода недоступно, скопируйте текстовый адрес выше)</i>",
                 parse_mode=ParseMode.HTML,
-                reply_markup=get_issued_esim_keyboard(esim.id)
+                reply_markup=get_issued_esim_keyboard(esim_id)
             )
+        
+        await callback.message.answer(
+            "Пожалуйста, проверьте eSIM.\n"
+            "✅ Если она работает, напишите номер слота (например, 101) в чат.\n"
+            "❌ Если она не работает, нажмите кнопку ниже."
+        )
+        
+        try:
+            await callback.answer()
+        except Exception:
+            pass
     
     try:
         await callback.answer()
     except Exception:
         pass
+
+
+@router.message(TestSlotState.waiting_for_test_result, AllowedUserFilter())
+async def process_test_slot_number(message: Message, state: FSMContext, bot: Bot):
+    slot_number = message.text.strip()
+    
+    if not (3 <= len(slot_number) <= 8 and slot_number.isalnum()):
+        await message.answer("Пожалуйста, введите корректный номер слота (от 3 до 8 символов, только буквы и цифры).")
+        return
+    
+    state_data = await state.get_data()
+    
+    esim_id = state_data.get("test_esim_id")
+    provider = state_data.get("test_provider")
+    supplier = state_data.get("test_supplier")
+    
+    if not esim_id or not provider:
+        await message.answer("Ошибка: данные сессии потеряны. Начните заново.")
+        await state.clear()
+        return
+    
+    if config.test_slot_notify_chat_id:
+        notify_text = f"✅ В <b>{slot_number} слот</b> поставлен оператор <b>{provider}</b>\n\n📦 Поставщик: {supplier}\n\n🆔 ID симки: {esim_id}"
+        try:
+            chat_id = int(config.test_slot_notify_chat_id)
+            print(f"Sending slot notification to chat_id: {chat_id}")
+            await bot.send_message(chat_id=chat_id, text=notify_text, parse_mode=ParseMode.HTML)
+            print(f"Slot notification sent successfully!")
+        except Exception as e:
+            print(f"Error sending slot notification: {e}")
+    
+    await message.answer("Слот сохранен. Уведомление отправлено.")
+    await state.clear()
+
+
+@router.callback_query(F.data == "test_esim_dead", TestSlotState.waiting_for_test_result, AllowedUserFilter())
+async def process_test_esim_dead(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    state_data = await state.get_data()
+    
+    esim_id = state_data.get("test_esim_id")
+    provider = state_data.get("test_provider")
+    lpa_string = state_data.get("test_lpa_string")
+    image_file_id = state_data.get("test_image_file_id")
+    supplier = state_data.get("test_supplier")
+    user_id = state_data.get("test_user_id")
+    username = state_data.get("test_username")
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Esim).where(Esim.id == esim_id)
+        )
+        esim = result.scalar_one_or_none()
+        
+        if not esim:
+            await callback.message.answer("Ошибка: eSIM не найдена.")
+            await state.clear()
+            return
+        
+        esim.status = EsimStatus.ISSUED.value
+        esim.issued_to_user_id = user_id
+        esim.updated_at = datetime.utcnow()
+        await session.commit()
+        
+        if config.google_sheet_id:
+            user_identifier = f"@{username} ({user_id})" if username else str(user_id)
+            formatted_date = datetime.now().strftime("%d.%m.%Y %H:%M")
+            asyncio.create_task(google_sheets.update_esim_status(
+                esim_id, "Выдана", user_identifier, formatted_date
+            ))
+    
+    if config.dead_sim_notify_chat_id:
+        caption = f"❌ НЕРАБОЧАЯ СИМКА ❌\nВозвращена пользователем: @{username}\n\n📱 Оператор: <b>{provider}</b>\n🔗 LPA: <code>{lpa_string}</code>\n📦 Поставщик: {supplier}"
+        try:
+            await bot.send_photo(
+                chat_id=int(config.dead_sim_notify_chat_id),
+                photo=image_file_id,
+                caption=caption,
+                parse_mode=ParseMode.HTML
+            )
+        except TelegramBadRequest:
+            await bot.send_message(
+                chat_id=int(config.dead_sim_notify_chat_id),
+                text=f"{caption}\n\n<i>(Фото недоступно)</i>",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+    
+    await callback.message.edit_text(
+        "Симка отмечена как нерабочая и отправлена администраторам. Вы можете взять другую.",
+        reply_markup=None
+    )
+    await state.clear()
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("return:"), AllowedUserFilter())
@@ -562,6 +819,91 @@ async def return_esim(callback: CallbackQuery):
         pass
 
 
+@router.callback_query(F.data.startswith("dead_esim:"), AllowedUserFilter())
+async def process_dead_esim(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    esim_id = int(callback.data.replace("dead_esim:", ""))
+    user_id = callback.from_user.id
+    username = callback.from_user.username
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Esim).where(Esim.id == esim_id)
+        )
+        esim = result.scalar_one_or_none()
+        
+        if not esim:
+            try:
+                await callback.answer("eSIM не найдена.", show_alert=True)
+            except Exception:
+                pass
+            return
+        
+        if esim.issued_to_user_id != user_id:
+            try:
+                await callback.answer("Вы можете отметить только свои eSIM.", show_alert=True)
+            except Exception:
+                pass
+            return
+        
+        provider = esim.provider
+        lpa_string = esim.lpa_string
+        image_file_id = esim.image_file_id
+        supplier = esim.supplier if esim.supplier else config.our_supplier_name
+        is_test = esim.is_test
+        section_name = "Тестовый" if is_test else "Основной"
+        
+        esim.status = EsimStatus.ISSUED.value
+        esim.issued_to_user_id = user_id
+        esim.updated_at = datetime.utcnow()
+        await session.commit()
+        
+        if config.google_sheet_id:
+            asyncio.create_task(google_sheets.update_esim_status(
+                esim_id, "Выдана", f"@{username}", datetime.now().strftime("%d.%m.%Y %H:%M")
+            ))
+    
+    if config.dead_sim_notify_chat_id:
+        caption = f"❌ НЕРАБОЧАЯ СИМКА ❌\nРаздел: {section_name}\nВозвращена пользователем: @{username}\n\n📱 Оператор: <b>{provider}</b>\n🔗 LPA: <code>{lpa_string}</code>\n📦 Поставщик: {supplier}"
+        try:
+            chat_id = int(config.dead_sim_notify_chat_id)
+            print(f"Sending dead SIM notification to chat_id: {chat_id}")
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=image_file_id,
+                caption=caption,
+                parse_mode=ParseMode.HTML
+            )
+            print(f"Dead SIM notification sent successfully!")
+        except TelegramBadRequest as e:
+            print(f"TelegramBadRequest sending dead SIM photo: {e}")
+            try:
+                await bot.send_message(
+                    chat_id=int(config.dead_sim_notify_chat_id),
+                    text=f"{caption}\n\n<i>(Фото недоступно)</i>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
+    
+    new_caption = f"📱 Оператор: <b>{provider}</b>\n🔗 LPA: <code>{lpa_string}</code>\n📦 Поставщик: {supplier}\n\n(Отмечена как нерабочая)"
+    try:
+        await callback.message.edit_caption(
+            caption=new_caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=None
+        )
+    except Exception:
+        await callback.message.answer(new_caption, parse_mode=ParseMode.HTML, reply_markup=None)
+    
+    await state.clear()
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
 def get_admin_panel_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="admin_add_user")],
@@ -581,7 +923,8 @@ async def admin_panel(message: Message):
 
 
 @router.callback_query(F.data == "admin_list_users", AllowedUserFilter())
-async def admin_list_users(callback: CallbackQuery, bot: Bot):
+async def admin_list_users(callback: CallbackQuery, bot: Bot, state: FSMContext):
+    await state.clear()
     is_admin = callback.from_user.id in config.allowed_users
     if not is_admin:
         try:
@@ -621,6 +964,7 @@ async def admin_list_users(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data == "admin_add_user", AllowedUserFilter())
 async def admin_add_user_start(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     is_admin = callback.from_user.id in config.allowed_users
     if not is_admin:
         try:
@@ -680,6 +1024,7 @@ async def admin_add_user_process(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin_remove_user", AllowedUserFilter())
 async def admin_remove_user_start(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     is_admin = callback.from_user.id in config.allowed_users
     if not is_admin:
         try:

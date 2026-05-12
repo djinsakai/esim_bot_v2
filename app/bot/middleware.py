@@ -10,6 +10,16 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# DEBUG: Print ALL updates before anything else
+class DebugMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if isinstance(event, CallbackQuery):
+            print(f"DEBUG: Received CallbackQuery from {event.from_user.id}, data: {event.data}")
+        elif isinstance(event, Message):
+            print(f"DEBUG: Received Message from {event.from_user.id}, text: {event.text[:50] if event.text else 'None'}")
+        return await handler(event, data)
+
+
 class AllowedUserMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user_id = None
@@ -18,6 +28,7 @@ class AllowedUserMiddleware(BaseMiddleware):
             user_id = event.from_user.id
         elif isinstance(event, CallbackQuery):
             user_id = event.from_user.id
+            print(f"MIDDLEWARE: Callback query from user {user_id}, data: {event.data}")
         else:
             return await handler(event, data)
         
@@ -53,5 +64,10 @@ class AllowedUserMiddleware(BaseMiddleware):
 
 
 def setup_middleware(dp: Dispatcher):
+    # Debug middleware first to see all updates
+    dp.message.middleware(DebugMiddleware())
+    dp.callback_query.middleware(DebugMiddleware())
+    
+    # Auth middleware
     dp.message.middleware(AllowedUserMiddleware())
     dp.callback_query.middleware(AllowedUserMiddleware())

@@ -15,6 +15,9 @@ class Config:
     database_url: str
     google_sheet_id: str
     google_credentials_path: str
+    our_supplier_name: str
+    test_slot_notify_chat_id: str
+    dead_sim_notify_chat_id: str
     
     @property
     def async_database_url(self) -> str:
@@ -46,6 +49,9 @@ def load_config() -> Config:
         database_url=os.getenv("DATABASE_URL", ""),
         google_sheet_id=os.getenv("GOOGLE_SHEET_ID", ""),
         google_credentials_path=os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json"),
+        our_supplier_name=os.getenv("OUR_SUPPLIER_NAME", "@kardosk"),
+        test_slot_notify_chat_id=os.getenv("TEST_SLOT_NOTIFY_CHAT_ID", ""),
+        dead_sim_notify_chat_id=os.getenv("DEAD_SIM_NOTIFY_CHAT_ID", ""),
     )
 
 

@@ -7,6 +7,7 @@ This is a Telegram bot for eSIM management built with:
 - **Database:** PostgreSQL with SQLAlchemy 2.0 (async via asyncpg)
 - **Image Processing:** OpenCV (cv2) + pyzbar for QR code recognition
 - **Migrations:** Alembic
+- **Google Sheets:** gspread for CRM sync
 
 ### Image Storage Strategy
 The bot uses Telegram's native file storage via `file_id`. When a user uploads a QR code image, we store only the Telegram `file_id` reference, not the actual image data. This keeps the database small but means images may become unavailable if Telegram purges them.
@@ -17,13 +18,14 @@ The bot uses Telegram's native file storage via `file_id`. When a user uploads a
 ```python
 class Esim(Base):
     __tablename__ = "esims"
-    
+
     id: int (Primary Key)
     lpa_string: str (Unique, indexed)  # LPA address like "LPA:1$smdp.domain.com$code"
     provider: str                       # Operator name: МТС, Билайн, Мегафон, Tele2, etc.
     image_file_id: str                  # Telegram file_id for the QR image
     status: str                         # 'available' or 'issued'
     is_test: bool                       # False = production, True = test eSIM
+    supplier: str | None                # Supplier tag (e.g., @kardosk or custom)
     issued_to_user_id: int | None       # Telegram user ID who received the eSIM
     created_at: datetime                # When added to database
     updated_at: datetime                # Auto-updated on status changes
@@ -33,7 +35,7 @@ class Esim(Base):
 ```python
 class User(Base):
     __tablename__ = "users"
-    
+
     id: int (Primary Key)
     telegram_id: int (Unique, indexed)  # Telegram user ID
     username: str | None                 # Telegram username (for easier identification)
@@ -194,8 +196,68 @@ The bot supports separate test eSIMs that are segregated from production stock b
   - All Google API calls are fire-and-forget; failures are logged but don't interrupt Telegram flow
   - Config: `GOOGLE_SHEET_ID` and `GOOGLE_CREDENTIALS_PATH` in .env
 - **User List Real Usernames:** Admin panel "Список пользователей" now fetches real usernames via `bot.get_chat(telegram_id)`, limited to last 20 users to avoid rate limits.
+- **Supplier Selection (Upload):** When uploading eSIMs, user selects between "Наш" (our team) or "Свой поставщик" (custom).
+  - Our team uses `OUR_SUPPLIER_NAME` from config (default: @kardosk)
+  - Custom allows user to input any supplier tag
+  - New FSM states: `selecting_supplier`, `waiting_for_supplier_name`
+- **Supplier Column:** Added `supplier` column to `esims` table via Alembic migration.
+- **Google Sheets 8-Column Format:** Updated sheet columns: ID | Дата загрузки | Оператор | LPA строка | Поставщик | Статус | Кому выдана | Дата выдачи
+- **Test Section Slot Input:** Test eSIMs require slot number input before confirmation.
+  - User receives eSIM photo with inline keyboard (Return / Not Working)
+  - Bot asks for slot number (e.g., 101)
+  - On success: notifies TEST_SLOT_NOTIFY_CHAT_ID with formatted message
+  - On "Не ворк": forwards to DEAD_SIM_NOTIFY_CHAT_ID with full eSIM data
+- **Inline "Не ворк" Button:** All issued eSIMs now have dual inline keyboard buttons:
+  - "🔙 Вернуть в базу" - returns eSIM to available pool
+  - "🚫 Не ворк" - marks as dead and forwards to admin chat
+- **Dead eSIM Notifications:** When user clicks "Не ворк", bot:
+  - Updates status in DB and Google Sheets to "❌ Не работает"
+  - Sends photo + caption to DEAD_SIM_NOTIFY_CHAT_ID
+  - Edits original message to show "(Отмечена как нерабочая)"
+- **Chat Type Filter (TEMPORARILY DISABLED):** Originally added to restrict bot to private chats only.
+  - `router.message.filter(F.chat.type == "private")`
+  - `router.callback_query.filter(F.chat.type == "private")`
+  - **BUG DISCOVERED:** This filter was SILENTLY DROPPING all CallbackQuery responses from inline buttons!
+  - The filter prevented callback handlers from ever receiving the callback, causing buttons to appear to do nothing.
+  - **FIX:** Commented out the filter temporarily. Re-enable after debugging complete.
+  - Group notifications still work via direct bot.send_message calls
+- **Bug Fix - AllowedUserFilter:** Updated to handle both Message and CallbackQuery types.
+- **Bug Fix - Database:** Changed to NullPool to avoid connection leaks.
+- **Bug Fix - Test Upload:** Fixed is_test flag being lost when state.clear() was called in supplier handlers. Now preserves is_test before clearing state.
+- **Global Error Handler:** Added in main.py to catch and print all exceptions.
+- **Debug Handler for Group Chat ID:** Added handler to capture correct group chat ID when user forwards a message from the group.
+- **Chat Type Filter (TEMPORARILY DISABLED):** Disabled to allow callback queries to work. Re-enable after full testing.
 
-## 4. Pending / Future Features (v2)
+## 4. Configuration (.env variables)
+
+```env
+# Telegram Bot
+BOT_TOKEN=your_bot_token
+ALLOWED_USERS=123456789,987654321  # Superadmin IDs (comma-separated)
+
+# Database
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=esim
+DB_USER=postgres
+DB_PASSWORD=your_password
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+
+# Google Sheets (optional)
+GOOGLE_SHEET_ID=your_sheet_id
+GOOGLE_CREDENTIALS_PATH=credentials.json
+
+# Supplier Settings
+OUR_SUPPLIER_NAME=@kardosk
+
+# Notification Chats
+# IMPORTANT: Get the correct group chat ID by forwarding a message from your group to the bot.
+# Group chat IDs start with -100 (e.g., -1001234567890)
+TEST_SLOT_NOTIFY_CHAT_ID=-100XXXXXXXXX  # Group for successful test slot notifications
+DEAD_SIM_NOTIFY_CHAT_ID=-100XXXXXXXXX   # Group for dead/broken eSIM notifications
+```
+
+## 5. Pending / Future Features (v2)
 
 - **Persistent Image Storage:** Transition from Telegram `file_id` to Google Drive API or local filesystem storage. Current `file_id` approach can fail if Telegram purges old files.
 - **Analytics Dashboard:** More detailed statistics, charts, historical data.

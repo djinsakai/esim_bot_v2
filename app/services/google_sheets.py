@@ -41,14 +41,14 @@ def get_worksheet():
     return spreadsheet.sheet1
 
 
-async def append_new_esim(esim_id: int, provider: str, lpa_string: str):
+async def append_new_esim(esim_id: int, provider: str, lpa_string: str, supplier: str = ""):
     try:
-        await asyncio.to_thread(_append_new_esim_sync, esim_id, provider, lpa_string)
+        await asyncio.to_thread(_append_new_esim_sync, esim_id, provider, lpa_string, supplier)
     except Exception as e:
         logger.error(f"Failed to append eSIM {esim_id} to Google Sheet: {e}\n{traceback.format_exc()}")
 
 
-def _append_new_esim_sync(esim_id: int, provider: str, lpa_string: str):
+def _append_new_esim_sync(esim_id: int, provider: str, lpa_string: str, supplier: str = ""):
     worksheet = get_worksheet()
     
     now = datetime.now()
@@ -59,6 +59,7 @@ def _append_new_esim_sync(esim_id: int, provider: str, lpa_string: str):
         formatted_date,
         provider,
         lpa_string,
+        supplier,
         "🟢 Доступна",
         "",
         ""
@@ -105,6 +106,6 @@ def _update_esim_status_sync(
         logger.warning(f"eSIM {esim_id} not found in Google Sheet")
         return
     
-    worksheet.update_cell(row_index, 5, status)
-    worksheet.update_cell(row_index, 6, user_identifier)
-    worksheet.update_cell(row_index, 7, issued_at)
+    worksheet.update_cell(row_index, 6, status)
+    worksheet.update_cell(row_index, 7, user_identifier)
+    worksheet.update_cell(row_index, 8, issued_at)

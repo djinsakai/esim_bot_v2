@@ -23,6 +23,7 @@ class Esim(Base):
     image_file_id: Mapped[str] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(String(20), default=EsimStatus.AVAILABLE.value)
     is_test: Mapped[bool] = mapped_column(Boolean, default=False)
+    supplier: Mapped[str | None] = mapped_column(String(100), nullable=True)
     issued_to_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -26,11 +26,9 @@ router = Router()
 # router.message.filter(F.chat.type == "private")
 # router.callback_query.filter(F.chat.type == "private")
 
-# DEBUG: Capture group chat IDs
-@router.message(F.chat.type.in_({"group", "supergroup"}))
-async def debug_group_message(message: Message):
-    print(f"DEBUG GROUP: chat_id={message.chat.id}, title={message.chat.title}")
-    await message.answer(f"Group chat ID: {message.chat.id}\nAdd this to .env")
+# Only allow private chat interactions - bot ignores all group messages
+router.message.filter(F.chat.type == "private")
+router.callback_query.filter(F.message.chat.type == "private")
 
 storage = MemoryStorage()
 

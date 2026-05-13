@@ -22,13 +22,16 @@ class DebugMiddleware(BaseMiddleware):
 
 class AllowedUserMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
+        # Silently ignore all group/supergroup chats - don't process or respond
+        if hasattr(event, 'chat') and event.chat and event.chat.type in ("group", "supergroup"):
+            return  # Simply ignore, don't call handler, don't send any response
+        
         user_id = None
         
         if isinstance(event, Message):
             user_id = event.from_user.id
         elif isinstance(event, CallbackQuery):
             user_id = event.from_user.id
-            print(f"MIDDLEWARE: Callback query from user {user_id}, data: {event.data}")
         else:
             return await handler(event, data)
         

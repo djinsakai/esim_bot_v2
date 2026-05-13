@@ -92,8 +92,11 @@ async def broadcast_test_esim(provider: str, bot: Bot):
     for user_id in user_ids:
         try:
             await bot.send_message(chat_id=user_id, text=message_text, parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Failed to send notification to user {user_id}: {e}")
+
+
+
 
 
 def get_main_menu(is_admin: bool = False):
@@ -103,7 +106,7 @@ def get_main_menu(is_admin: bool = False):
     ]
     if is_admin:
         keyboard.append([KeyboardButton(text="⚙️ Админ-панель")])
-    return ReplyKeyboardMarkup(resize_keyboard=True, keyboard=keyboard)
+    return ReplyKeyboardMarkup(resize_keyboard=True, is_persistent=True, keyboard=keyboard)
 
 
 def get_provider_buttons():
@@ -243,11 +246,6 @@ async def process_supplier_other(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
     except Exception as e:
         print(f"Error in process_supplier_other: {e}")
-        try:
-            await callback.message.answer(f"Ошибка: {e}")
-        except Exception:
-            pass
-        await callback.answer()
 
 
 @router.message(UploadState.waiting_for_supplier_name, AllowedUserFilter())
@@ -262,9 +260,11 @@ async def process_supplier_name_input(message: Message, state: FSMContext):
             supplier_name = f"@{supplier_name}"
         
         await state.update_data(supplier=supplier_name)
+        is_admin = message.from_user.id in config.allowed_users
         await message.answer(
             f"✅ Поставщик: {supplier_name}\n\n"
-            "Теперь отправьте QR-коды eSIM (фото или документ)."
+            "Теперь отправьте QR-коды eSIM (фото или документ).",
+            reply_markup=get_main_menu(is_admin)
         )
         await state.set_state(UploadState.waiting_for_photo)
     except Exception as e:
@@ -708,7 +708,8 @@ async def process_test_slot_number(message: Message, state: FSMContext, bot: Bot
         except Exception as e:
             print(f"Error sending slot notification: {e}")
     
-    await message.answer("Слот сохранен. Уведомление отправлено.")
+    is_admin = message.from_user.id in config.allowed_users
+    await message.answer("Слот сохранен. Уведомление отправлено.", reply_markup=get_main_menu(is_admin))
     await state.clear()
 
 
@@ -792,12 +793,9 @@ async def return_esim(callback: CallbackQuery):
             return
         
         if esim.issued_to_user_id != user_id:
-            try:
-                await callback.answer("Вы можете вернуть только свои eSIM.", show_alert=True)
-            except Exception:
-                pass
+            await callback.answer("Вы не можете вернуть эту eSIM.", show_alert=True)
             return
-        
+
         esim.status = EsimStatus.AVAILABLE.value
         esim.issued_to_user_id = None
         esim.updated_at = datetime.utcnow()
@@ -837,65 +835,22 @@ async def process_dead_esim(callback: CallbackQuery, state: FSMContext, bot: Bot
             return
         
         if esim.issued_to_user_id != user_id:
-            try:
-                await callback.answer("Вы можете отметить только свои eSIM.", show_alert=True)
-            except Exception:
-                pass
+            await callback.answer("Вы не можете вернуть эту eSIM.", show_alert=True)
             return
-        
-        provider = esim.provider
-        lpa_string = esim.lpa_string
-        image_file_id = esim.image_file_id
-        supplier = esim.supplier if esim.supplier else config.our_supplier_name
-        is_test = esim.is_test
-        section_name = "Тестовый" if is_test else "Основной"
-        
-        esim.status = EsimStatus.ISSUED.value
-        esim.issued_to_user_id = user_id
+
+        esim.status = EsimStatus.AVAILABLE.value
+        esim.issued_to_user_id = None
         esim.updated_at = datetime.utcnow()
         await session.commit()
         
         if config.google_sheet_id:
             asyncio.create_task(google_sheets.update_esim_status(
-                esim_id, "Выдана", f"@{username}", datetime.now().strftime("%d.%m.%Y %H:%M")
+                esim_id, "🟢 Доступна", "", ""
             ))
+        
+        await callback.message.answer("✅ eSIM возвращена в базу.")
+        await callback.message.delete()
     
-    if config.dead_sim_notify_chat_id:
-        caption = f"❌ НЕРАБОЧАЯ СИМКА ❌\nРаздел: {section_name}\nВозвращена пользователем: @{username}\n\n📱 Оператор: <b>{provider}</b>\n🔗 LPA: <code>{lpa_string}</code>\n📦 Поставщик: {supplier}"
-        try:
-            chat_id = int(config.dead_sim_notify_chat_id)
-            print(f"Sending dead SIM notification to chat_id: {chat_id}")
-            await bot.send_photo(
-                chat_id=chat_id,
-                photo=image_file_id,
-                caption=caption,
-                parse_mode=ParseMode.HTML
-            )
-            print(f"Dead SIM notification sent successfully!")
-        except TelegramBadRequest as e:
-            print(f"TelegramBadRequest sending dead SIM photo: {e}")
-            try:
-                await bot.send_message(
-                    chat_id=int(config.dead_sim_notify_chat_id),
-                    text=f"{caption}\n\n<i>(Фото недоступно)</i>",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
-        except Exception:
-            pass
-    
-    new_caption = f"📱 Оператор: <b>{provider}</b>\n🔗 LPA: <code>{lpa_string}</code>\n📦 Поставщик: {supplier}\n\n(Отмечена как нерабочая)"
-    try:
-        await callback.message.edit_caption(
-            caption=new_caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=None
-        )
-    except Exception:
-        await callback.message.answer(new_caption, parse_mode=ParseMode.HTML, reply_markup=None)
-    
-    await state.clear()
     try:
         await callback.answer()
     except Exception:
@@ -1105,9 +1060,27 @@ async def confirm_reset_stats(callback: CallbackQuery):
         await session.commit()
     
     try:
-        await callback.answer("✅ Статистика обновлена!", show_alert=True)
+        await callback.answer()
     except Exception:
         pass
+
+
+# Global fallback handler - MUST be at the very bottom so other handlers run first
+MENU_BUTTONS = [
+    "📥 Загрузить eSIM", "🧪 Загрузить тестовую",
+    "📤 Получить eSIM", "📊 Статистика",
+    "⚙️ Админ-панель", "Отмена"
+]
+
+@router.message(F.text, AllowedUserFilter())
+async def handle_unknown_text(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None and message.text not in MENU_BUTTONS:
+        is_admin = message.from_user.id in config.allowed_users
+        await message.answer(
+            "Пожалуйста, используйте кнопки меню.",
+            reply_markup=get_main_menu(is_admin)
+        )
     
     today = date.today()
     

@@ -821,6 +821,12 @@ async def process_dead_esim(callback: CallbackQuery, state: FSMContext, bot: Bot
     user_id = callback.from_user.id
     username = callback.from_user.username
     
+    esim_provider = None
+    esim_lpa = None
+    esim_image = None
+    esim_supplier = None
+    esim_is_test = False
+    
     async with async_session_maker() as session:
         result = await session.execute(
             select(Esim).where(Esim.id == esim_id)
@@ -835,21 +841,52 @@ async def process_dead_esim(callback: CallbackQuery, state: FSMContext, bot: Bot
             return
         
         if esim.issued_to_user_id != user_id:
-            await callback.answer("Вы не можете вернуть эту eSIM.", show_alert=True)
+            await callback.answer("Вы не можете пометить эту eSIM.", show_alert=True)
             return
 
-        esim.status = EsimStatus.AVAILABLE.value
-        esim.issued_to_user_id = None
+        esim_provider = esim.provider
+        esim_lpa = esim.lpa_string
+        esim_image = esim.image_file_id
+        esim_supplier = esim.supplier
+        esim_is_test = esim.is_test
+        
+        esim.status = EsimStatus.ISSUED.value
         esim.updated_at = datetime.utcnow()
         await session.commit()
         
         if config.google_sheet_id:
+            user_identifier = f"@{username}" if username else str(user_id)
+            formatted_date = datetime.now().strftime("%d.%m.%Y %H:%M")
             asyncio.create_task(google_sheets.update_esim_status(
-                esim_id, "🟢 Доступна", "", ""
+                esim_id, "❌ Не работает", user_identifier, formatted_date
             ))
         
-        await callback.message.answer("✅ eSIM возвращена в базу.")
-        await callback.message.delete()
+        if callback.message.caption:
+            await callback.message.edit_caption(
+                callback.message.caption + "\n\n(Отмечена как нерабочая)",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await callback.message.answer("eSIM отмечена как нерабочая.")
+    
+    if config.dead_sim_notify_chat_id and esim_provider:
+        caption = f"❌ НЕРАБОЧАЯ СИМКА ❌\nВозвращена пользователем: @{username}\n\n📱 Оператор: <b>{esim_provider}</b>\n🔗 LPA: <code>{esim_lpa}</code>\n📦 Поставщик: {esim_supplier or config.our_supplier_name}\n\n🆔 ID симки: {esim_id}"
+        try:
+            chat_id = int(config.dead_sim_notify_chat_id)
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=esim_image,
+                caption=caption,
+                parse_mode=ParseMode.HTML
+            )
+        except TelegramBadRequest:
+            await bot.send_message(
+                chat_id=int(config.dead_sim_notify_chat_id),
+                text=f"{caption}\n\n<i>(Фото недоступно)</i>",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
     
     try:
         await callback.answer()

@@ -2,7 +2,7 @@ aiogram==3.4.1
 sqlalchemy[asyncio]==2.0.25
 asyncpg==0.29.0
 alembic==1.13.1
-opencv-python-headless==4.9.0.80
+opencv-contrib-python==4.10.0.84
 pyzbar==0.1.9
 python-dotenv==1.0.0
 numpy<2

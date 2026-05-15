@@ -60,7 +60,7 @@ def _append_new_esim_sync(esim_id: int, provider: str, lpa_string: str, supplier
         provider,
         lpa_string,
         supplier,
-        "🟢 Доступна",
+        "🟢 Available",
         "",
         ""
     ]

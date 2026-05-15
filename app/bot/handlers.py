@@ -537,7 +537,7 @@ async def process_get_esim(callback: CallbackQuery):
             user_identifier = f"@{username} ({user_id})" if username else str(user_id)
             formatted_date = datetime.now().strftime("%d.%m.%Y %H:%M")
             asyncio.create_task(google_sheets.update_esim_status(
-                esim_id, "🔴 Выдана", user_identifier, formatted_date
+                esim_id, "🔴 Issued", user_identifier, formatted_date
             ))
         
         caption = f"📱 Оператор: <b>{esim.provider}</b>\n🔗 LPA: <code>{esim.lpa_string}</code>\n📦 Поставщик: {supplier}"
@@ -632,7 +632,7 @@ async def process_get_test_esim(callback: CallbackQuery, state: FSMContext, bot:
             user_identifier = f"@{username} ({user_id})" if username else str(user_id)
             formatted_date = datetime.now().strftime("%d.%m.%Y %H:%M")
             asyncio.create_task(google_sheets.update_esim_status(
-                esim_id, "🔴 Выдана", user_identifier, formatted_date
+                esim_id, "🔴 Issued", user_identifier, formatted_date
             ))
         
         await state.update_data(
@@ -745,7 +745,7 @@ async def process_test_esim_dead(callback: CallbackQuery, state: FSMContext, bot
             user_identifier = f"@{username} ({user_id})" if username else str(user_id)
             formatted_date = datetime.now().strftime("%d.%m.%Y %H:%M")
             asyncio.create_task(google_sheets.update_esim_status(
-                esim_id, "Выдана", user_identifier, formatted_date
+                esim_id, "🔴 Issued", user_identifier, formatted_date
             ))
     
     if config.dead_sim_notify_chat_id:
@@ -803,7 +803,7 @@ async def return_esim(callback: CallbackQuery):
         
         if config.google_sheet_id:
             asyncio.create_task(google_sheets.update_esim_status(
-                esim_id, "🟢 Доступна", "", ""
+                esim_id, "🟢 Available", "", ""
             ))
         
         await callback.message.answer("✅ eSIM возвращена в базу.")
@@ -858,7 +858,7 @@ async def process_dead_esim(callback: CallbackQuery, state: FSMContext, bot: Bot
             user_identifier = f"@{username}" if username else str(user_id)
             formatted_date = datetime.now().strftime("%d.%m.%Y %H:%M")
             asyncio.create_task(google_sheets.update_esim_status(
-                esim_id, "❌ Не работает", user_identifier, formatted_date
+                esim_id, "❌ Invalid", user_identifier, formatted_date
             ))
         
         if callback.message.caption:

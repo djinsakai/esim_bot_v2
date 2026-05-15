@@ -6,7 +6,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.session.aiohttp import AiohttpSession
 
 from app.utils.config import config
-from app.bot.handlers import router
+from app.bot.handlers import router, group_router
 from app.bot.middleware import setup_middleware
 from app.db.database import init_db
 
@@ -43,6 +43,7 @@ async def main():
 
     setup_middleware(dp)
     dp.include_router(router)
+    dp.include_router(group_router)
 
     # Инициализация базы данных
     await init_db()

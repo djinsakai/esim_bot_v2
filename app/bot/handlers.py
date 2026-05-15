@@ -12,6 +12,7 @@ from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 import asyncio
+import re
 
 from app.db.models import Esim, EsimStatus, User
 from app.db.database import async_session_maker
@@ -21,14 +22,13 @@ from app.bot.filters import AllowedUserFilter
 from app.services import google_sheets
 
 router = Router()
-
-# Temporarily disabled chat type filter for debugging
-# router.message.filter(F.chat.type == "private")
-# router.callback_query.filter(F.chat.type == "private")
+group_router = Router()
 
 # Only allow private chat interactions - bot ignores all group messages
 router.message.filter(F.chat.type == "private")
 router.callback_query.filter(F.message.chat.type == "private")
+
+# Group router - NO filters, for callbacks in group chats (QA buttons, etc.)
 
 storage = MemoryStorage()
 
@@ -699,11 +699,15 @@ async def process_test_slot_number(message: Message, state: FSMContext, bot: Bot
         return
     
     if config.test_slot_notify_chat_id:
-        notify_text = f"✅ В <b>{slot_number} слот</b> поставлен оператор <b>{provider}</b>\n\n📦 Поставщик: {supplier}\n\n🆔 ID симки: {esim_id}"
+        notify_text = f"⭕️ В <b>{slot_number} слот</b> поставлен оператор <b>{provider}</b>\n\n📦 Поставщик: {supplier}\n\n🆔 ID симки: {esim_id}"
         try:
             chat_id = int(config.test_slot_notify_chat_id)
             print(f"Sending slot notification to chat_id: {chat_id}")
-            await bot.send_message(chat_id=chat_id, text=notify_text, parse_mode=ParseMode.HTML)
+            qa_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Work", callback_data=f"qa_work:{esim_id}:{slot_number}")],
+                [InlineKeyboardButton(text="⛔️ Instant Block", callback_data=f"qa_instant:{esim_id}:{slot_number}")]
+            ])
+            await bot.send_message(chat_id=chat_id, text=notify_text, parse_mode=ParseMode.HTML, reply_markup=qa_keyboard)
             print(f"Slot notification sent successfully!")
         except Exception as e:
             print(f"Error sending slot notification: {e}")
@@ -1219,6 +1223,85 @@ async def cancel_reset_stats(callback: CallbackQuery):
         await callback.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=get_stats_keyboard())
     except Exception:
         pass
+    
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+import re
+
+@group_router.callback_query(F.data.startswith("qa_work:"))
+async def process_qa_work(callback: CallbackQuery, bot: Bot):
+    print(f"QA Work button clicked! callback.data: {callback.data}")
+    parts = callback.data.replace("qa_work:", "").split(":")
+    esim_id = int(parts[0])
+    slot_number = parts[1] if len(parts) > 1 else "?"
+    username = callback.from_user.username or "Unknown"
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Esim).where(Esim.id == esim_id)
+        )
+        esim = result.scalar_one_or_none()
+    
+    operator = esim.provider if esim else "?"
+    
+    new_text = f"✅ В <b>{slot_number}</b> слот поставлен оператор <b>{operator}</b>\n\n👌 Подтверждено: @{username}"
+    
+    try:
+        await callback.message.edit_text(
+            new_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=None
+        )
+    except Exception as e:
+        print(f"Error editing QA message: {e}")
+    
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+@group_router.callback_query(F.data.startswith("qa_instant:"))
+async def process_qa_instant(callback: CallbackQuery, bot: Bot):
+    print(f"QA Instant button clicked! callback.data: {callback.data}")
+    parts = callback.data.replace("qa_instant:", "").split(":")
+    esim_id = int(parts[0])
+    slot_number = parts[1] if len(parts) > 1 else "?"
+    username = callback.from_user.username or "Unknown"
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Esim).where(Esim.id == esim_id)
+        )
+        esim = result.scalar_one_or_none()
+        
+        if esim:
+            esim.status = "instant_blocked"
+            esim.updated_at = datetime.utcnow()
+            await session.commit()
+            
+            if config.google_sheet_id:
+                asyncio.create_task(google_sheets.update_esim_status(
+                    esim_id, "⛔️ Instant", f"@{username}", datetime.now().strftime("%d.%m.%Y %H:%M")
+                ))
+    
+    operator = esim.provider if esim else "?"
+    supplier = esim.supplier if esim else config.our_supplier_name
+    
+    new_text = f"⛔️ Instant Block: <b>{slot_number}</b> слот (<b>{operator}</b>)\n\n📦 Поставщик: {supplier}\n\n🆔 ID симки: {esim_id}\n\n👌 Подтверждено: @{username}"
+    
+    try:
+        await callback.message.edit_text(
+            new_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=None
+        )
+    except Exception as e:
+        print(f"Error editing QA message: {e}")
     
     try:
         await callback.answer()

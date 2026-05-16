@@ -9,7 +9,8 @@ You are a Senior Python Developer. Your task is to write clean, asynchronous, sc
 - **Database:** PostgreSQL
 - **ORM:** `SQLAlchemy` (v2.0, async via `asyncpg`)
 - **Migrations:** `Alembic`
-- **Image & QR Processing:** `OpenCV` (`cv2`), `pyzbar` or `qreader` (MUST support processing of inverted colors).
+- **QR Scanner:** `WeChatQRCode` (opencv-contrib-python) - CNN-based for robust scanning
+- **QR Fallback:** `pyzbar` with image preprocessing pipeline
 
 ## Configuration & Authorization (.env)
 The bot is private and for internal use only.
@@ -23,49 +24,83 @@ Main table `esims`:
 - `lpa_string`: String, Unique (LPA address string, used to prevent duplicates)
 - `provider`: String (Operator name: МТС, Билайн, Tele2, etc.)
 - `image_file_id`: String (Telegram `file_id`. *Note: we use Telegram servers for MVP file storage*).
-- `status`: String, default='available' (Options: `'available'`, `'issued'`, `'invalid'`)
-- `issued_to_user_id`: BigInteger, nullable (Telegram ID of the user who received/invalidated the eSIM)
+- `status`: String, default='available' (Options: `'available'`, `'issued'`, `'invalid'`, `'instant_blocked'`)
+- `is_test`: Boolean (False = production, True = test eSIM)
+- `supplier`: String, nullable (Supplier tag, e.g., @kardosk or custom)
+- `issued_to_user_id`: BigInteger, nullable (Telegram ID of the user who received the eSIM)
 - `created_at`: DateTime (Creation date)
 - `updated_at`: DateTime (Date of the last status change, automatically updated on issue/return/invalid actions)
 
+**Additional table `users`:**
+- `id`: Integer, Primary Key
+- `telegram_id`: Integer, Unique (Telegram user ID)
+- `username`: String, nullable
+- `added_at`: DateTime
+
 ## Main Menu (UI)
-On `/start`, the bot sends a `ReplyKeyboardMarkup` with 3 main buttons:
+On `/start`, the bot sends a `ReplyKeyboardMarkup` with persistent keyboard:
 1. 📥 **Загрузить eSIM**
-2. 📤 **Получить eSIM**
-3. 📊 **Статистика**
+2. 🧪 **Загрузить тестовую**
+3. 📤 **Получить eSIM**
+4. 📊 **Статистика**
+5. ⚙️ **Админ-панель** (superadmins only)
+
+Key: Use `is_persistent=True` in ReplyKeyboardMarkup to keep keyboard visible.
 
 ## Core Scenarios (Business Logic)
 
 ### 1. Upload eSIM
 **Goal:** Add a new QR code to the DB, using Telegram servers for image storage.
-1. User clicks "📥 **Загрузить eSIM**". Bot asks for a photo/screenshot of the QR code.
-2. Bot downloads the photo to a memory buffer and attempts to parse the QR code. It must try standard reading first; if it fails, it MUST apply color inversion (`cv2.bitwise_not()`) and try again.
-3. Extract the `lpa_string`. If it already exists in the DB, return error: "❌ Эта eSIM уже есть в базе!".
-4. Bot prompts the user to select an operator via Inline buttons (МТС, Билайн, Мегафон, Tele2, etc.).
-5. Save to DB: `image_file_id` (from the Message object), `lpa_string`, `provider`, `status='available'`. Send a success message.
+1. User clicks "📥 **Загрузить eSIM**" or "🧪 **Загрузить тестовую**". 
+2. Bot prompts for supplier selection: "Наш" (@kardosk) or "Свой" (custom).
+3. Bot downloads the photo to a memory buffer and attempts to parse the QR code.
+4. **Robust QR Scanning Pipeline** (in `qr_reader.py`):
+   - First: Try WeChatQRCode (CNN-based, handles logos, distortions, inverted colors)
+   - Fallback: Try pyzbar with preprocessing (grayscale, invert, CLAHE, threshold)
+5. Extract the `lpa_string`. If it already exists in the DB, return error: "❌ Эта eSIM уже есть в базе!".
+6. Auto-detect provider from SM-DP+ domain, or ask for manual selection.
+7. Save to DB: `image_file_id`, `lpa_string`, `provider`, `status='available'`, `is_test`, `supplier`.
+8. Sync to Google Sheets: Status "🟢 Available"
 
 ### 2. Get eSIM (Returns & Invalid Handling)
 **Goal:** Issue the oldest available eSIM with race condition protection.
-1. User clicks "📤 **Получить eSIM**". Bot displays an Inline menu with current stock. Example: *МТС (5 шт.), Билайн (2 шт.)*. Buttons for providers with 0 stock should be hidden or disabled.
+1. User clicks "📤 **Получить eSIM**". Bot displays an Inline menu with current stock by provider.
 2. After provider selection, fetch the oldest available eSIM: `ORDER BY created_at ASC LIMIT 1 FOR UPDATE`.
-3. Change status to `'issued'`, set `issued_to_user_id`, update `updated_at` to current timestamp.
-4. Bot sends the user the photo (using `image_file_id`) and the monospaced text `{lpa_string}`.
-5. **Attach an Inline keyboard beneath the issued eSIM:**
-   - 🔙 **Вернуть в базу**: Changes status to `'available'`, clears `issued_to_user_id`, updates `updated_at`. (Action restricted ONLY to the user who took it).
-   - ❌ **Невалидный QR**: Changes status to `'invalid'`, updates `updated_at`. (Action restricted ONLY to the user who took it).
+3. Change status to `'issued'`, set `issued_to_user_id`, update `updated_at`.
+4. Bot sends the user the photo and LPA string with HTML formatting.
+5. **Attach an Inline keyboard:**
+   - 🔙 **Вернуть в базу**: Returns to available pool (status='available')
+   - 🚫 **Не ворк**: Marks as dead, forwards to DEAD_SIM_NOTIFY_CHAT_ID
 
-### 3. Dynamic Statistics
+### 3. Test Section (Slot Input + QA Buttons)
+**Goal:** Manage test eSIMs with slot assignment and QA verification.
+1. User selects test provider, uploads QR code.
+2. Bot sends photo with inline keyboard (Return / Not Working).
+3. Bot asks for slot number (e.g., "101").
+4. On slot input: Send notification to TEST_SLOT_NOTIFY_CHAT_ID with QA buttons:
+   - "✅ Work" (callback: `qa_work:{esim_id}:{slot_number}`)
+   - "⛔️ Instant Block" (callback: `qa_instant:{esim_id}:{slot_number}`)
+5. QA handlers use `group_router` (no private chat filter) to work in group chats.
+6. On "Work": Message updates to compact confirmation.
+7. On "Instant Block": Status set to "instant_blocked", Google Sheets updated to "⛔️ Instant".
+
+### 4. Dynamic Statistics
 **Goal:** Show current stock and today's activity.
 1. User clicks "📊 **Статистика**". Bot calculates metrics from the DB on the fly.
-2. "Today's activity" is calculated using the `updated_at` column (where date matches `CURRENT_DATE`).
-3. Bot replies with the following exact template:
-   ```text
-   📊 Наличие в базе:
-   🟢 Всего доступно: 45 шт.
-   - МТС: 20
-   - Билайн: 15
-   - Tele2: 10
-   
-   📈 Активность за СЕГОДНЯ:
-   ✅ Выдано: 12 шт.
-   ❌ Отправлено в брак: 2 шт.
+2. "Today's activity" is calculated using the `updated_at` column.
+3. Counts BOTH normal and test eSIMs together.
+4. Output uses terminal-style format with HTML ParseMode.
+
+### 5. Google Sheets Status Values
+| Database Value | Google Sheets Display |
+|---------------|----------------------|
+| available | 🟢 Available |
+| issued | 🔴 Issued |
+| invalid | ❌ Invalid |
+| instant_blocked | ⛔️ Instant |
+
+### 6. Router Architecture
+- `router` - Main handlers with `F.chat.type == "private"` filter
+- `group_router` - Handlers for group chat callbacks (no filter)
+  - Used for QA buttons in TEST_SLOT_NOTIFY_CHAT_ID
+  - Must be included in dp after main router

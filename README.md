@@ -10,6 +10,7 @@ Telegram bot for managing eSIM inventory with QR code scanning, supplier trackin
 - 📤 **Get eSIM** - Issue available eSIMs to users with inline keyboard
 - 📊 **Statistics** - Track inventory and daily activity
 - 🧪 **Test Section** - Separate test eSIM flow with slot number input
+- ✅ **QA Confirmation** - Group buttons to confirm work/instant block
 - 🚫 **Dead SIM Reporting** - Report broken eSIMs directly to admin chat
 - ⚙️ **Admin Panel** - Manage user access (superadmins only)
 - 🔒 **Authorization** - Two-level access (superadmins + database users)
@@ -17,7 +18,7 @@ Telegram bot for managing eSIM inventory with QR code scanning, supplier trackin
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - PostgreSQL 14+
 - Telegram Bot Token
 
@@ -49,6 +50,8 @@ alembic upgrade head
 ```bash
 python -m app.main
 ```
+
+The bot will automatically download WeChatQRCode AI models (~2MB) on first QR scan.
 
 ## Configuration (.env)
 
@@ -143,9 +146,20 @@ Columns (8 total):
 - **aiogram 3** - Telegram bot framework
 - **SQLAlchemy 2.0** - ORM with async support
 - **asyncpg** - Async PostgreSQL driver
-- **OpenCV + pyzbar** - QR code recognition (supports inverted colors)
+- **WeChatQRCode** - CNN-based QR recognition (handles logos, distortions, inverted colors)
+- **openCV-contrib-python** - Computer vision + WeChatQRCode module
+- **pyzbar** - Fallback QR scanner
 - **Alembic** - Database migrations
 - **gspread** - Google Sheets API
+
+## Google Sheets Status Values
+
+| Status | Description |
+|--------|-------------|
+| 🟢 Available | eSIM uploaded or returned to pool |
+| 🔴 Issued | eSIM issued to user |
+| ❌ Invalid | User reported as not working |
+| ⛔️ Instant | QA confirmed instant block |
 
 ## License
 

@@ -61,7 +61,7 @@ PROVIDER_MAPPING = {
     "mno-0b.esimservices.com": "Йота",
     "mno-04.esimservices.com": "Мегафон",
     "smdp.alfa.edu.az": "Алфа",
-    "smdp.tele2.ru": "Tele2",
+    "t2.toprsp.com": "Tele2",
 }
 
 

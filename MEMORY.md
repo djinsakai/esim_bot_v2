@@ -5,7 +5,8 @@
 This is a Telegram bot for eSIM management built with:
 - **Framework:** aiogram 3.x (async Python)
 - **Database:** PostgreSQL with SQLAlchemy 2.0 (async via asyncpg)
-- **Image Processing:** OpenCV (cv2) + pyzbar for QR code recognition
+- **Image Processing:** WeChatQRCode (CNN-based) + pyzbar for QR code recognition
+- **QR Scanner:** opencv-contrib-python with WeChatQRCode module
 - **Migrations:** Alembic
 - **Google Sheets:** gspread for CRM sync
 
@@ -227,6 +228,27 @@ The bot supports separate test eSIMs that are segregated from production stock b
 - **Global Error Handler:** Added in main.py to catch and print all exceptions.
 - **Debug Handler for Group Chat ID:** Added handler to capture correct group chat ID when user forwards a message from the group.
 - **Chat Type Filter (TEMPORARILY DISABLED):** Disabled to allow callback queries to work. Re-enable after full testing.
+- **WeChatQRCode Scanner:** Replaced qreader with WeChatQRCode from opencv-contrib-python for robust QR scanning.
+  - Uses CNN-based detection for logos, stylized markers, screen distortions
+  - Auto-downloads 4 Caffe model files on first run
+  - Fallback pipeline: WeChatQRCode → pyzbar with image preprocessing
+- **Status String Update:** Changed Russian status strings to English with emojis in Google Sheets:
+  - "🟢 Доступна" → "🟢 Available"
+  - "🔴 Выдана" → "🔴 Issued"
+  - "❌ Не работает" → "❌ Invalid"
+  - Database enum values remain as: available, issued, invalid
+- **QA Button System (Test Section):** Added inline QA buttons to test slot notifications:
+  - "✅ Work" and "⛔️ Instant Block" buttons in TEST_SLOT_NOTIFY_CHAT_ID
+  - qa_work and qa_instant handlers in separate group_router (no private filter)
+  - Messages edit to compact format with slot number passed via callback_data
+  - "⛔️ Instant" status for instant blocks in DB and Google Sheets
+- **Dead eSIM Fix:** Fixed dead_esim handler to keep status as "issued" instead of returning to pool.
+  - Status remains "issued", issued_to_user_id not cleared
+  - Google Sheets status set to "❌ Invalid"
+- **Persistent Reply Keyboard:** Added `is_persistent=True` to ReplyKeyboardMarkup.
+- **Global Fallback Handler:** Added fallback handler at bottom of router for unknown text messages.
+- **Group Router:** Created separate `group_router` for group chat callbacks (QA buttons).
+- **Message Edit Fix:** Fixed dead_esim to use edit_caption instead of edit_text for photo messages.
 
 ## 4. Configuration (.env variables)
 
@@ -253,13 +275,23 @@ OUR_SUPPLIER_NAME=@kardosk
 # Notification Chats
 # IMPORTANT: Get the correct group chat ID by forwarding a message from your group to the bot.
 # Group chat IDs start with -100 (e.g., -1001234567890)
-TEST_SLOT_NOTIFY_CHAT_ID=-100XXXXXXXXX  # Group for successful test slot notifications
+TEST_SLOT_NOTIFY_CHAT_ID=-100XXXXXXXXX  # Group for successful test slot notifications + QA buttons
 DEAD_SIM_NOTIFY_CHAT_ID=-100XXXXXXXXX   # Group for dead/broken eSIM notifications
 ```
 
-## 5. Pending / Future Features (v2)
+## 5. Google Sheets Status Values
+
+| Status | Display | Used When |
+|--------|---------|-----------|
+| 🟢 Available | Available | eSIM uploaded or returned |
+| 🔴 Issued | Issued | eSIM issued to user |
+| ❌ Invalid | Invalid | User marks as "Не ворк" |
+| ⛔️ Instant | Instant | QA confirms instant block |
+
+## 6. Pending / Future Features (v2)
 
 - **Persistent Image Storage:** Transition from Telegram `file_id` to Google Drive API or local filesystem storage. Current `file_id` approach can fail if Telegram purges old files.
 - **Analytics Dashboard:** More detailed statistics, charts, historical data.
 - **Notification System:** Alert admins when stock is low.
 - **User Roles:** Add roles like "editor", "viewer" with different permissions.
+- **QR Model Caching:** Pre-download WeChatQRCode models at startup instead of first use.

@@ -40,10 +40,6 @@ class UploadState(StatesGroup):
     waiting_for_supplier_name = State()
 
 
-class TestSlotState(StatesGroup):
-    waiting_for_test_result = State()
-
-
 class GetEsimState(StatesGroup):
     selecting_provider = State()
 
@@ -51,6 +47,10 @@ class GetEsimState(StatesGroup):
 class AdminState(StatesGroup):
     waiting_for_add_user_id = State()
     waiting_for_remove_user_id = State()
+
+
+class SipAttachState(StatesGroup):
+    waiting_for_sip_number = State()
 
 
 PROVIDERS = ["МТС", "Билайн", "Мегафон", "Tele2", "Другие"]
@@ -126,6 +126,7 @@ def get_provider_stock_buttons(stock_dict: dict):
 
 def get_issued_esim_keyboard(esim_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Привязать сип", callback_data=f"attach_sip:{esim_id}")],
         [InlineKeyboardButton(text="🔙 Вернуть в базу", callback_data=f"return:{esim_id}")],
         [InlineKeyboardButton(text="🚫 Не ворк", callback_data=f"dead_esim:{esim_id}")],
     ])
@@ -323,7 +324,7 @@ async def show_stats(message: Message):
         issued_today_result = await session.execute(
             select(func.count(Esim.id))
             .where(
-                Esim.status == EsimStatus.ISSUED.value,
+                Esim.issued_to_user_id != None,
                 func.date(Esim.updated_at) == today
             )
         )
@@ -332,7 +333,7 @@ async def show_stats(message: Message):
         issued_by_provider_result = await session.execute(
             select(Esim.provider, func.count(Esim.id))
             .where(
-                Esim.status == EsimStatus.ISSUED.value,
+                Esim.issued_to_user_id != None,
                 func.date(Esim.updated_at) == today
             )
             .group_by(Esim.provider)
@@ -591,7 +592,7 @@ async def get_test_providers(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("get_test_provider:"), AllowedUserFilter())
-async def process_get_test_esim(callback: CallbackQuery, state: FSMContext, bot: Bot):
+async def process_get_test_esim(callback: CallbackQuery, state: FSMContext):
     provider = callback.data.replace("get_test_provider:", "")
     user_id = callback.from_user.id
     username = callback.from_user.username
@@ -635,17 +636,6 @@ async def process_get_test_esim(callback: CallbackQuery, state: FSMContext, bot:
                 esim_id, "🔴 Issued", user_identifier, formatted_date
             ))
         
-        await state.update_data(
-            test_esim_id=esim_id,
-            test_provider=esim.provider,
-            test_lpa_string=lpa_string,
-            test_image_file_id=image_file_id,
-            test_supplier=supplier,
-            test_user_id=user_id,
-            test_username=username
-        )
-        await state.set_state(TestSlotState.waiting_for_test_result)
-        
         caption = f"📱 Оператор: <b>{provider}</b> (ТЕСТОВАЯ)\n🔗 LPA: <code>{lpa_string}</code>\n📦 Поставщик: {supplier}"
         
         try:
@@ -662,11 +652,9 @@ async def process_get_test_esim(callback: CallbackQuery, state: FSMContext, bot:
                 reply_markup=get_issued_esim_keyboard(esim_id)
             )
         
-        await callback.message.answer(
-            "Пожалуйста, проверьте eSIM.\n"
-            "✅ Если она работает, напишите номер слота (например, 101) в чат.\n"
-            "❌ Если она не работает, нажмите кнопку ниже."
-        )
+        await state.update_data(esim_id=esim_id)
+        await state.set_state(SipAttachState.waiting_for_sip_number)
+        await callback.message.answer("Введите номер сипа:")
         
         try:
             await callback.answer()
@@ -679,45 +667,75 @@ async def process_get_test_esim(callback: CallbackQuery, state: FSMContext, bot:
         pass
 
 
-@router.message(TestSlotState.waiting_for_test_result, AllowedUserFilter())
-async def process_test_slot_number(message: Message, state: FSMContext, bot: Bot):
-    slot_number = message.text.strip()
+@router.callback_query(F.data.startswith("attach_sip:"), AllowedUserFilter())
+async def process_attach_sip(callback: CallbackQuery, state: FSMContext):
+    esim_id = int(callback.data.replace("attach_sip:", ""))
     
-    if not (3 <= len(slot_number) <= 8 and slot_number.isalnum()):
-        await message.answer("Пожалуйста, введите корректный номер слота (от 3 до 8 символов, только буквы и цифры).")
+    await state.update_data(esim_id=esim_id)
+    await state.set_state(SipAttachState.waiting_for_sip_number)
+    
+    await callback.message.answer("Введите номер сипа:")
+    
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+@router.message(SipAttachState.waiting_for_sip_number, AllowedUserFilter())
+async def process_sip_number(message: Message, state: FSMContext, bot: Bot):
+    sip_number = message.text.strip()
+    
+    if not sip_number:
+        await message.answer("Пожалуйста, введите корректный номер сипа.")
         return
     
     state_data = await state.get_data()
+    esim_id = state_data.get("esim_id")
     
-    esim_id = state_data.get("test_esim_id")
-    provider = state_data.get("test_provider")
-    supplier = state_data.get("test_supplier")
-    
-    if not esim_id or not provider:
+    if not esim_id:
         await message.answer("Ошибка: данные сессии потеряны. Начните заново.")
         await state.clear()
         return
     
-    if config.test_slot_notify_chat_id:
-        notify_text = f"⭕️ В <b>{slot_number} слот</b> поставлен оператор <b>{provider}</b>\n\n📦 Поставщик: {supplier}\n\n🆔 ID симки: {esim_id}"
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Esim).where(Esim.id == esim_id)
+        )
+        esim = result.scalar_one_or_none()
+    
+    if not esim:
+        await message.answer("Ошибка: eSIM не найдена.")
+        await state.clear()
+        return
+    
+    section_name = "Test" if esim.is_test else "Main"
+    supplier = esim.supplier if esim.supplier else config.our_supplier_name
+    
+    notify_chat_id = config.test_slot_notify_chat_id
+    
+    if notify_chat_id:
+        notify_text = (
+            f"⭕️ <b>{sip_number}</b> слот ({esim.provider}) - {section_name}\n\n"
+            f"📦 Поставщик: {supplier}\n\n"
+            f"🆔 ID симки: {esim_id}"
+        )
         try:
-            chat_id = int(config.test_slot_notify_chat_id)
-            print(f"Sending slot notification to chat_id: {chat_id}")
+            chat_id = int(notify_chat_id)
             qa_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Work", callback_data=f"qa_work:{esim_id}:{slot_number}")],
-                [InlineKeyboardButton(text="⛔️ Instant Block", callback_data=f"qa_instant:{esim_id}:{slot_number}")]
+                [InlineKeyboardButton(text="✅ Work", callback_data=f"qa_work:{esim_id}:{sip_number}")],
+                [InlineKeyboardButton(text="⛔️ Instant Block", callback_data=f"qa_instant:{esim_id}:{sip_number}")]
             ])
             await bot.send_message(chat_id=chat_id, text=notify_text, parse_mode=ParseMode.HTML, reply_markup=qa_keyboard)
-            print(f"Slot notification sent successfully!")
         except Exception as e:
-            print(f"Error sending slot notification: {e}")
+            print(f"Error sending SIP notification: {e}")
     
     is_admin = message.from_user.id in config.allowed_users
-    await message.answer("Слот сохранен. Уведомление отправлено.", reply_markup=get_main_menu(is_admin))
+    await message.answer("Сип привязан. Уведомление отправлено.", reply_markup=get_main_menu(is_admin))
     await state.clear()
 
 
-@router.callback_query(F.data == "test_esim_dead", TestSlotState.waiting_for_test_result, AllowedUserFilter())
+@router.callback_query(F.data == "test_esim_dead", AllowedUserFilter())
 async def process_test_esim_dead(callback: CallbackQuery, state: FSMContext, bot: Bot):
     state_data = await state.get_data()
     
@@ -864,14 +882,6 @@ async def process_dead_esim(callback: CallbackQuery, state: FSMContext, bot: Bot
             asyncio.create_task(google_sheets.update_esim_status(
                 esim_id, "❌ Invalid", user_identifier, formatted_date
             ))
-        
-        if callback.message.caption:
-            await callback.message.edit_caption(
-                callback.message.caption + "\n\n(Отмечена как нерабочая)",
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            await callback.message.answer("eSIM отмечена как нерабочая.")
     
     if config.dead_sim_notify_chat_id and esim_provider:
         caption = f"❌ НЕРАБОЧАЯ СИМКА ❌\nВозвращена пользователем: @{username}\n\n📱 Оператор: <b>{esim_provider}</b>\n🔗 LPA: <code>{esim_lpa}</code>\n📦 Поставщик: {esim_supplier or config.our_supplier_name}\n\n🆔 ID симки: {esim_id}"
@@ -891,6 +901,21 @@ async def process_dead_esim(callback: CallbackQuery, state: FSMContext, bot: Bot
             )
         except Exception:
             pass
+    
+    new_caption = f"❌ Не ворк\n\n👌 Подтверждено: @{username}"
+    try:
+        await callback.message.edit_caption(
+            caption=new_caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=None
+        )
+    except TelegramBadRequest:
+        try:
+            await callback.message.edit_caption(caption=new_caption)
+        except Exception:
+            pass
+    except Exception:
+        pass
     
     try:
         await callback.answer()
@@ -1093,7 +1118,7 @@ async def confirm_reset_stats(callback: CallbackQuery):
         await session.execute(
             update(Esim)
             .where(
-                Esim.status == EsimStatus.ISSUED.value,
+                Esim.issued_to_user_id != None,
                 func.date(Esim.updated_at) == today
             )
             .values(updated_at=yesterday)
@@ -1141,7 +1166,7 @@ async def handle_unknown_text(message: Message, state: FSMContext):
         issued_today_result = await session.execute(
             select(func.count(Esim.id))
             .where(
-                Esim.status == EsimStatus.ISSUED.value,
+                Esim.issued_to_user_id != None,
                 func.date(Esim.updated_at) == today
             )
         )
@@ -1150,7 +1175,7 @@ async def handle_unknown_text(message: Message, state: FSMContext):
         issued_by_provider_result = await session.execute(
             select(Esim.provider, func.count(Esim.id))
             .where(
-                Esim.status == EsimStatus.ISSUED.value,
+                Esim.issued_to_user_id != None,
                 func.date(Esim.updated_at) == today
             )
             .group_by(Esim.provider)
@@ -1173,6 +1198,7 @@ async def handle_unknown_text(message: Message, state: FSMContext):
         pass
 
 
+
 @router.callback_query(F.data == "cancel_reset_stats", AllowedUserFilter())
 async def cancel_reset_stats(callback: CallbackQuery):
     today = date.today()
@@ -1193,7 +1219,7 @@ async def cancel_reset_stats(callback: CallbackQuery):
         issued_today_result = await session.execute(
             select(func.count(Esim.id))
             .where(
-                Esim.status == EsimStatus.ISSUED.value,
+                Esim.issued_to_user_id != None,
                 func.date(Esim.updated_at) == today
             )
         )
@@ -1202,7 +1228,7 @@ async def cancel_reset_stats(callback: CallbackQuery):
         issued_by_provider_result = await session.execute(
             select(Esim.provider, func.count(Esim.id))
             .where(
-                Esim.status == EsimStatus.ISSUED.value,
+                Esim.issued_to_user_id != None,
                 func.date(Esim.updated_at) == today
             )
             .group_by(Esim.provider)
@@ -1246,9 +1272,14 @@ async def process_qa_work(callback: CallbackQuery, bot: Bot):
         )
         esim = result.scalar_one_or_none()
     
-    operator = esim.provider if esim else "?"
+    if esim:
+        operator = esim.provider
+        section_name = "Test" if esim.is_test else "Main"
+    else:
+        operator = "?"
+        section_name = "Main"
     
-    new_text = f"✅ В <b>{slot_number}</b> слот поставлен оператор <b>{operator}</b>\n\n👌 Подтверждено: @{username}"
+    new_text = f"✅ <b>{slot_number}</b> слот ({operator}) - {section_name}\n\n👌 Подтверждено: @{username}"
     
     try:
         await callback.message.edit_text(
@@ -1289,10 +1320,16 @@ async def process_qa_instant(callback: CallbackQuery, bot: Bot):
                     esim_id, "⛔️ Instant", f"@{username}", datetime.now().strftime("%d.%m.%Y %H:%M")
                 ))
     
-    operator = esim.provider if esim else "?"
-    supplier = esim.supplier if esim else config.our_supplier_name
+    if esim:
+        operator = esim.provider
+        supplier = esim.supplier if esim.supplier else config.our_supplier_name
+        section_name = "Test" if esim.is_test else "Main"
+    else:
+        operator = "?"
+        supplier = config.our_supplier_name
+        section_name = "Main"
     
-    new_text = f"⛔️ Instant Block: <b>{slot_number}</b> слот (<b>{operator}</b>)\n\n📦 Поставщик: {supplier}\n\n🆔 ID симки: {esim_id}\n\n👌 Подтверждено: @{username}"
+    new_text = f"⛔️ Instant Block: <b>{slot_number}</b> слот ({operator}) - {section_name}\n\n📦 Поставщик: {supplier}\n\n🆔 ID симки: {esim_id}\n\n👌 Подтверждено: @{username}"
     
     try:
         await callback.message.edit_text(

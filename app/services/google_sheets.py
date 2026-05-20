@@ -109,3 +109,32 @@ def _update_esim_status_sync(
     worksheet.update_cell(row_index, 6, status)
     worksheet.update_cell(row_index, 7, user_identifier)
     worksheet.update_cell(row_index, 8, issued_at)
+
+
+async def update_esim_status_only(esim_id: int, status: str):
+    try:
+        await asyncio.to_thread(
+            _update_esim_status_only_sync,
+            esim_id,
+            status
+        )
+    except Exception as e:
+        logger.error(f"Failed to update eSIM {esim_id} status in Google Sheet: {e}\n{traceback.format_exc()}")
+
+
+def _update_esim_status_only_sync(esim_id: int, status: str):
+    worksheet = get_worksheet()
+    
+    all_values = worksheet.get_all_values()
+    
+    row_index = None
+    for idx, row in enumerate(all_values, start=1):
+        if row and str(row[0]) == str(esim_id):
+            row_index = idx
+            break
+    
+    if row_index is None:
+        logger.warning(f"eSIM {esim_id} not found in Google Sheet")
+        return
+    
+    worksheet.update_cell(row_index, 6, status)

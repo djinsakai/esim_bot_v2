@@ -53,6 +53,10 @@ class SipAttachState(StatesGroup):
     waiting_for_sip_number = State()
 
 
+class ReserveSyncState(StatesGroup):
+    waiting_for_reserve_count = State()
+
+
 PROVIDERS = ["МТС", "Билайн", "Мегафон", "Tele2", "Другие"]
 
 PROVIDER_MAPPING = {
@@ -126,7 +130,7 @@ def get_provider_stock_buttons(stock_dict: dict):
 
 def get_issued_esim_keyboard(esim_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔗 Привязать сип", callback_data=f"attach_sip:{esim_id}")],
+        [InlineKeyboardButton(text="🔗 Привязать сип", callback_data=f"attach_sip:{esim_id}"), InlineKeyboardButton(text="📦 Резерв +", callback_data=f"to_reserve:{esim_id}")],
         [InlineKeyboardButton(text="🔙 Вернуть в базу", callback_data=f"return:{esim_id}")],
         [InlineKeyboardButton(text="🚫 Не ворк", callback_data=f"dead_esim:{esim_id}")],
     ])
@@ -135,6 +139,7 @@ def get_issued_esim_keyboard(esim_id: int):
 def get_stats_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Обновить активность за сегодня", callback_data="reset_stats")],
+        [InlineKeyboardButton(text="📊 Сверка резерва", callback_data="menu_reserve_sync")],
     ])
 
 
@@ -733,6 +738,137 @@ async def process_sip_number(message: Message, state: FSMContext, bot: Bot):
     is_admin = message.from_user.id in config.allowed_users
     await message.answer("Сип привязан. Уведомление отправлено.", reply_markup=get_main_menu(is_admin))
     await state.clear()
+
+
+@router.callback_query(F.data.startswith("to_reserve:"), AllowedUserFilter())
+async def process_to_reserve(callback: CallbackQuery):
+    esim_id = int(callback.data.replace("to_reserve:", ""))
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Esim).where(Esim.id == esim_id)
+        )
+        esim = result.scalar_one_or_none()
+        
+        if not esim:
+            try:
+                await callback.answer("eSIM не найдена.", show_alert=True)
+            except Exception:
+                pass
+            return
+        
+        esim.in_reserve = True
+        await session.commit()
+    
+    if config.google_sheet_id:
+        username = callback.from_user.username
+        user_identifier = f"@{username} ({callback.from_user.id})" if username else str(callback.from_user.id)
+        formatted_date = datetime.now().strftime("%d.%m.%Y %H:%M")
+        asyncio.create_task(google_sheets.update_esim_status(
+            esim_id, "🟡 Reserved", user_identifier, formatted_date
+        ))
+    
+    try:
+        await callback.message.edit_text(
+            f"✅ eSIM #{esim_id} переведена в Резерв.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=None
+        )
+    except TelegramBadRequest:
+        try:
+            await callback.message.edit_caption(
+                caption=f"✅ eSIM #{esim_id} переведена в Резерв.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=None
+            )
+        except Exception:
+            pass
+    except Exception:
+        pass
+    
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "menu_reserve_sync", AllowedUserFilter())
+async def reserve_sync_start(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(func.count(Esim.id)).where(Esim.in_reserve == True)
+        )
+        current_count = result.scalar()
+    
+    await state.update_data(current_reserve_count=current_count)
+    await state.set_state(ReserveSyncState.waiting_for_reserve_count)
+    
+    await callback.message.answer(
+        f"Сейчас в резерве числится <b>{current_count}</b> симок.\n"
+        f"Введите актуальное количество болванок, которые остались у вас на руках (чтобы списать потраченные):",
+        parse_mode=ParseMode.HTML
+    )
+    
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+@router.message(ReserveSyncState.waiting_for_reserve_count, AllowedUserFilter())
+async def process_reserve_sync(message: Message, state: FSMContext):
+    user_input = message.text.strip()
+    
+    if not user_input.isdigit():
+        await message.answer("❌ Пожалуйста, введите число.")
+        return
+    
+    new_count = int(user_input)
+    
+    state_data = await state.get_data()
+    current_count = state_data.get("current_reserve_count", 0)
+    
+    if new_count > current_count:
+        await message.answer(f"Ошибка: Вы не можете указать больше, чем числится в базе ({current_count}).")
+        await state.clear()
+        is_admin = message.from_user.id in config.allowed_users
+        await message.answer("⚙️ Меню:", reply_markup=get_main_menu(is_admin))
+        return
+    
+    to_remove = current_count - new_count
+    
+    if to_remove > 0:
+        async with async_session_maker() as session:
+            result = await session.execute(
+                select(Esim)
+                .where(Esim.in_reserve == True)
+                .order_by(Esim.updated_at.asc())
+                .limit(to_remove)
+            )
+            esims_to_remove = result.scalars().all()
+            
+            removed_ids = []
+            for esim in esims_to_remove:
+                esim.in_reserve = False
+                removed_ids.append(esim.id)
+            
+            await session.commit()
+        
+        if config.google_sheet_id:
+            for esim_id in removed_ids:
+                asyncio.create_task(google_sheets.update_esim_status_only(
+                    esim_id, "🔴 Issued"
+                ))
+    
+    await message.answer(
+        f"✅ Успешно! Списано <b>{to_remove}</b> симок. Текущий остаток в резерве: <b>{new_count}</b>.",
+        parse_mode=ParseMode.HTML
+    )
+    await state.clear()
+    is_admin = message.from_user.id in config.allowed_users
+    await message.answer("⚙️ Меню:", reply_markup=get_main_menu(is_admin))
 
 
 @router.callback_query(F.data == "test_esim_dead", AllowedUserFilter())

@@ -1411,11 +1411,15 @@ async def process_qa_work(callback: CallbackQuery, bot: Bot):
     if esim:
         operator = esim.provider
         section_name = "Test" if esim.is_test else "Main"
+        supplier = esim.supplier if esim.supplier else None
     else:
         operator = "?"
         section_name = "Main"
+        supplier = None
     
-    new_text = f"✅ <b>{slot_number}</b> слот ({operator}) - {section_name}\n\n👌 Подтверждено: @{username}"
+    supplier_line = f"📦 Поставщик: {supplier}" if supplier else "📦 Поставщик: не указан"
+    
+    new_text = f"✅ <b>{slot_number}</b> слот ({operator}) - {section_name}\n\n{supplier_line}\n\n👌 Подтверждено: @{username}"
     
     try:
         await callback.message.edit_text(
@@ -1460,12 +1464,16 @@ async def process_qa_instant(callback: CallbackQuery, bot: Bot):
         operator = esim.provider
         supplier = esim.supplier if esim.supplier else config.our_supplier_name
         section_name = "Test" if esim.is_test else "Main"
+        lpa_string = esim.lpa_string if esim.lpa_string else None
     else:
         operator = "?"
         supplier = config.our_supplier_name
         section_name = "Main"
+        lpa_string = None
     
-    new_text = f"⛔️ Instant Block: <b>{slot_number}</b> слот ({operator}) - {section_name}\n\n📦 Поставщик: {supplier}\n\n🆔 ID симки: {esim_id}\n\n👌 Подтверждено: @{username}"
+    lpa_line = f"📡 LPA: <code>{lpa_string}</code>" if lpa_string else "📡 LPA: <i>не указана</i>"
+    
+    new_text = f"⛔️ Instant Block: <b>{slot_number}</b> слот ({operator}) - {section_name}\n\n📦 Поставщик: {supplier}\n\n🆔 ID симки: {esim_id}\n\n{lpa_line}\n\n👌 Подтверждено: @{username}"
     
     try:
         await callback.message.edit_text(

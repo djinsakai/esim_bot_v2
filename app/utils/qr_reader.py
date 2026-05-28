@@ -135,6 +135,17 @@ def _robust_decode_sync(photo_bytes: bytes, detector: cv2.wechat_qrcode_WeChatQR
     if img is None:
         return None
     
+    # Sanitize: prevent segfault from WeChatQRCode C++ detector
+    if len(img.shape) == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    max_dimension = 1500
+    height, width = img.shape
+    if height > max_dimension or width > max_dimension:
+        scaling_factor = max_dimension / float(max(height, width))
+        new_size = (int(width * scaling_factor), int(height * scaling_factor))
+        img = cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
+    
     processing_steps = [
         ("original", lambda x: x),
         ("grayscale", _process_grayscale),
@@ -174,7 +185,7 @@ def _robust_decode_sync(photo_bytes: bytes, detector: cv2.wechat_qrcode_WeChatQR
         except Exception:
             pass
     
-    inverted_gray = cv2.bitwise_not(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+    inverted_gray = cv2.bitwise_not(img)
     decoded = _try_pyzbar_decode(inverted_gray)
     if decoded:
         return decoded

@@ -83,6 +83,9 @@ def get_provider_from_domain(lpa_string: str) -> str | None:
     return None
 
 
+_album_data: dict[str, dict] = {}
+
+
 async def broadcast_test_esim(provider: str, bot: Bot):
     user_ids = set(config.allowed_users)
     
@@ -358,6 +361,111 @@ async def show_stats(message: Message):
     await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_stats_keyboard())
 
 
+@router.message(UploadState.waiting_for_photo, F.media_group_id, F.photo, AllowedUserFilter())
+async def process_album(message: Message, state: FSMContext, bot: Bot):
+    media_group_id = message.media_group_id
+    state_data = await state.get_data()
+    is_test = state_data.get("is_test", False)
+    supplier = state_data.get("supplier", "")
+
+    if media_group_id not in _album_data:
+        _album_data[media_group_id] = {
+            "messages": [],
+            "is_test": is_test,
+            "supplier": supplier,
+        }
+
+    _album_data[media_group_id]["messages"].append(message)
+
+    await asyncio.sleep(2)
+
+    album = _album_data.pop(media_group_id, None)
+    if not album:
+        return
+
+    messages = album["messages"]
+    total = len(messages)
+    success_count = 0
+    errors = []
+
+    for i, msg in enumerate(messages, 1):
+        try:
+            file_id = msg.document.file_id if msg.document else msg.photo[-1].file_id
+            file_name = msg.document.file_name if msg.document else None
+            print(f"[DEBUG] Album photo {i}/{total} — file_id: {file_id}")
+
+            print(f"[DEBUG] Downloading {file_id}...")
+            file = await bot.get_file(file_id)
+            photo_bytes = await bot.download_file(file.file_path)
+            print(f"[DEBUG] Download complete for {file_id}")
+
+            print(f"[DEBUG] Decoding QR for {file_id}...")
+            lpa_string = await read_qr_code(photo_bytes.read())
+            print(f"[DEBUG] Decode result for {file_id}: {'found' if lpa_string else 'None'}")
+
+            if not lpa_string:
+                label = f" ({file_name})" if file_name else ""
+                errors.append(f"- Фото {i}{label}: QR не считался")
+                continue
+
+            if not lpa_string.startswith("LPA:1$"):
+                errors.append(f"- Фото {i}: Неверный формат ({lpa_string[:30]}...)")
+                continue
+
+            async with async_session_maker() as session:
+                existing = await session.execute(
+                    select(Esim).where(Esim.lpa_string == lpa_string)
+                )
+                if existing.scalar_one_or_none():
+                    errors.append(f"- Фото {i}: Дубликат ({lpa_string[:30]}...)")
+                    continue
+
+            detected_provider = get_provider_from_domain(lpa_string)
+            if not detected_provider:
+                errors.append(f"- Фото {i}: Не удалось определить оператора")
+                continue
+
+            async with async_session_maker() as session:
+                try:
+                    esim = Esim(
+                        lpa_string=lpa_string,
+                        provider=detected_provider,
+                        image_file_id=file_id,
+                        status=EsimStatus.AVAILABLE.value,
+                        is_test=is_test,
+                        supplier=supplier
+                    )
+                    session.add(esim)
+                    await session.commit()
+                    await session.refresh(esim)
+                    esim_id = esim.id
+                    success_count += 1
+
+                    if config.google_sheet_id:
+                        asyncio.create_task(google_sheets.append_new_esim(esim_id, detected_provider, lpa_string, supplier))
+
+                    if is_test:
+                        asyncio.create_task(broadcast_test_esim(detected_provider, bot))
+
+                except Exception:
+                    errors.append(f"- Фото {i}: Ошибка при сохранении в БД")
+
+        except Exception as e:
+            print(f"[CRITICAL ERROR] Album photo {i}: {e}")
+            errors.append(f"- Фото {i}: Ошибка при обработке файла")
+
+    text = f"📊 <b>Массовая загрузка завершена</b>\n\n"
+    text += f"Всего обработано: {total}\n"
+    text += f"✅ Успешно добавлено: {success_count}\n"
+    text += f"❌ Ошибок: {len(errors)}\n"
+
+    if errors:
+        text += "\n<i>Список ошибок:</i>\n"
+        text += "\n".join(errors)
+
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+
 @router.message(UploadState.waiting_for_photo, F.photo | F.document, AllowedUserFilter())
 async def process_photo(message: Message, state: FSMContext, bot: Bot):
     state_data = await state.get_data()
@@ -366,8 +474,10 @@ async def process_photo(message: Message, state: FSMContext, bot: Bot):
     
     if message.photo:
         file_id = message.photo[-1].file_id
+        file_name = None
     elif message.document and message.document.mime_type.startswith("image/"):
         file_id = message.document.file_id
+        file_name = message.document.file_name
     else:
         await message.answer("❌ Пожалуйста, отправьте QR-код как фото или картинку (JPEG/PNG).")
         return
@@ -377,7 +487,10 @@ async def process_photo(message: Message, state: FSMContext, bot: Bot):
     lpa_string = await read_qr_code(photo_bytes.read())
     
     if not lpa_string:
-        await message.answer("❌ Не удалось распознать QR-код. Попробуйте ещё раз.")
+        if file_name:
+            await message.answer(f"❌ В файле «{file_name}» не найден QR-код.")
+        else:
+            await message.answer("❌ Не удалось распознать QR-код. Попробуйте ещё раз.")
         return
     
     async with async_session_maker() as session:
@@ -385,7 +498,10 @@ async def process_photo(message: Message, state: FSMContext, bot: Bot):
             select(Esim).where(Esim.lpa_string == lpa_string)
         )
         if existing.scalar_one_or_none():
-            await message.answer("❌ Эта eSIM уже есть в базе! Отправьте следующее фото QR-кода.")
+            if file_name:
+                await message.answer(f"❌ Файл «{file_name}» уже есть в базе!\nОтправьте следующий QR-код.")
+            else:
+                await message.answer("❌ Эта eSIM уже есть в базе!\nОтправьте следующий QR-код.")
             return
     
     detected_provider = get_provider_from_domain(lpa_string)
@@ -406,7 +522,10 @@ async def process_photo(message: Message, state: FSMContext, bot: Bot):
                 await session.refresh(esim)
                 esim_id = esim.id
             except Exception:
-                await message.answer("❌ Эта eSIM уже есть в базе! Отправьте следующее фото QR-кода или нажмите 'Отмена' для выхода.")
+                if file_name:
+                    await message.answer(f"❌ Файл «{file_name}» уже есть в базе!\nОтправьте следующий QR-код или нажмите «Отмена» для выхода.")
+                else:
+                    await message.answer("❌ Эта eSIM уже есть в базе!\nОтправьте следующий QR-код или нажмите «Отмена» для выхода.")
                 return
         
         if config.google_sheet_id:
@@ -691,8 +810,8 @@ async def process_attach_sip(callback: CallbackQuery, state: FSMContext):
 async def process_sip_number(message: Message, state: FSMContext, bot: Bot):
     sip_number = message.text.strip()
     
-    if not sip_number:
-        await message.answer("Пожалуйста, введите корректный номер сипа.")
+    if not sip_number.isdigit():
+        await message.answer("❌ Ошибка: Номер сипа должен состоять только из цифр. Пожалуйста, введите корректный номер:")
         return
     
     state_data = await state.get_data()
@@ -1038,6 +1157,8 @@ async def process_dead_esim(callback: CallbackQuery, state: FSMContext, bot: Bot
         except Exception:
             pass
     
+    await state.clear()
+    
     new_caption = f"❌ Не ворк\n\n👌 Подтверждено: @{username}"
     try:
         await callback.message.edit_caption(
@@ -1047,7 +1168,11 @@ async def process_dead_esim(callback: CallbackQuery, state: FSMContext, bot: Bot
         )
     except TelegramBadRequest:
         try:
-            await callback.message.edit_caption(caption=new_caption)
+            await callback.message.edit_text(
+                text=f"{callback.message.text}\n\n(Отмечена как нерабочая)" if callback.message.text else new_caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=None
+            )
         except Exception:
             pass
     except Exception:

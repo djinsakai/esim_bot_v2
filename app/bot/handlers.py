@@ -333,7 +333,7 @@ async def show_stats(message: Message):
             select(func.count(Esim.id))
             .where(
                 Esim.issued_to_user_id != None,
-                func.date(Esim.updated_at) == today
+                func.date(Esim.issued_at) == today
             )
         )
         total_issued_today = issued_today_result.scalar()
@@ -342,7 +342,7 @@ async def show_stats(message: Message):
             select(Esim.provider, func.count(Esim.id))
             .where(
                 Esim.issued_to_user_id != None,
-                func.date(Esim.updated_at) == today
+                func.date(Esim.issued_at) == today
             )
             .group_by(Esim.provider)
         )
@@ -653,6 +653,7 @@ async def process_get_esim(callback: CallbackQuery):
         esim_id = esim.id
         esim.status = EsimStatus.ISSUED.value
         esim.issued_to_user_id = user_id
+        esim.issued_at = datetime.utcnow()
         esim.updated_at = datetime.utcnow()
         await session.commit()
         
@@ -750,6 +751,7 @@ async def process_get_test_esim(callback: CallbackQuery, state: FSMContext):
         
         esim.status = EsimStatus.ISSUED.value
         esim.issued_to_user_id = user_id
+        esim.issued_at = datetime.utcnow()
         esim.updated_at = datetime.utcnow()
         await session.commit()
         
@@ -977,9 +979,12 @@ async def process_reserve_sync(message: Message, state: FSMContext):
         
         if config.google_sheet_id:
             for esim_id in removed_ids:
-                asyncio.create_task(google_sheets.update_esim_status_only(
-                    esim_id, "🔴 Issued"
-                ))
+                try:
+                    asyncio.create_task(google_sheets.update_esim_status_only(
+                        esim_id, "🔴 Issued"
+                    ))
+                except Exception as e:
+                    print(f"[ERROR] Failed to queue GS update for esim_id {esim_id}: {e}")
     
     await message.answer(
         f"✅ Успешно! Списано <b>{to_remove}</b> симок. Текущий остаток в резерве: <b>{new_count}</b>.",
@@ -1015,6 +1020,7 @@ async def process_test_esim_dead(callback: CallbackQuery, state: FSMContext, bot
         
         esim.status = EsimStatus.ISSUED.value
         esim.issued_to_user_id = user_id
+        esim.issued_at = datetime.utcnow()
         esim.updated_at = datetime.utcnow()
         await session.commit()
         
@@ -1380,9 +1386,9 @@ async def confirm_reset_stats(callback: CallbackQuery):
             update(Esim)
             .where(
                 Esim.issued_to_user_id != None,
-                func.date(Esim.updated_at) == today
+                func.date(Esim.issued_at) == today
             )
-            .values(updated_at=yesterday)
+            .values(issued_at=yesterday)
         )
         await session.commit()
     
@@ -1428,7 +1434,7 @@ async def handle_unknown_text(message: Message, state: FSMContext):
             select(func.count(Esim.id))
             .where(
                 Esim.issued_to_user_id != None,
-                func.date(Esim.updated_at) == today
+                func.date(Esim.issued_at) == today
             )
         )
         total_issued_today = issued_today_result.scalar()
@@ -1437,7 +1443,7 @@ async def handle_unknown_text(message: Message, state: FSMContext):
             select(Esim.provider, func.count(Esim.id))
             .where(
                 Esim.issued_to_user_id != None,
-                func.date(Esim.updated_at) == today
+                func.date(Esim.issued_at) == today
             )
             .group_by(Esim.provider)
         )
@@ -1481,7 +1487,7 @@ async def cancel_reset_stats(callback: CallbackQuery):
             select(func.count(Esim.id))
             .where(
                 Esim.issued_to_user_id != None,
-                func.date(Esim.updated_at) == today
+                func.date(Esim.issued_at) == today
             )
         )
         total_issued_today = issued_today_result.scalar()
@@ -1490,7 +1496,7 @@ async def cancel_reset_stats(callback: CallbackQuery):
             select(Esim.provider, func.count(Esim.id))
             .where(
                 Esim.issued_to_user_id != None,
-                func.date(Esim.updated_at) == today
+                func.date(Esim.issued_at) == today
             )
             .group_by(Esim.provider)
         )
